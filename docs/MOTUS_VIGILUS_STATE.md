@@ -2,58 +2,63 @@
 
 | Champ | Valeur |
 |-------|--------|
-| STATUS | Phase 2 — En cours (U-ALPHA v2 à coder) |
+| STATUS | Phase 4 — En cours (Notebooks Colab a valider) |
 | DATE | Avril 2026 |
-| ARCHITECTURE | 2 Frégates (U-ALPHA + U-GAMMA) |
+| ARCHITECTURE | 2 Fregates (U-ALPHA + U-GAMMA) |
 | VERSION | V3 — Option C : Gemini 2.0 Flash + WHAM + SMPL→R15 |
-| CONTRAT .npz | Inchangé : rotations (N,15,4) + root_position (N,3) + metadata |
-| CONTRAT JSON GEMINI | Défini et documenté dans README |
+| CONTRAT .npz | Inchange : rotations (N,15,4) + root_position (N,3) + metadata |
+| CONTRAT JSON GEMINI | Defini et documente dans README |
 
 ---
 
 ## [LAST_WORK]
 
-- Projet renommé ANIMA-MECHANICUS (WH40K lore)
-- Depot GitHub créé : kioka8877-ux/ANIMA-MECHANICUS
-- Architecture pivot : MediaPipe abandonné → Gemini 2.0 Flash + WHAM + SMPL→R15
-- README v2 rédigé avec pipeline complet Option C
-- Contrat JSON Gemini défini et documenté (segments, qualité, caméra, warnings)
-- U-GAMMA (motus_forge.py v3) : fonctionnel, inchangé
-- motus_extract.py actuel : version MediaPipe obsolète (à remplacer)
+- Projet renomme ANIMA-MECHANICUS (WH40K lore)
+- Depot GitHub cree : kioka8877-ux/ANIMA-MECHANICUS
+- Architecture pivot : MediaPipe abandonne → Gemini 2.0 Flash + WHAM + SMPL→R15
+- README v2 redige avec pipeline complet Option C
+- Contrat JSON Gemini defini et documente (segments, qualite, camera, warnings)
+- U-GAMMA (motus_forge.py v3) : fonctionnel, inchange
+- motus_extract.py v2 : COMPLETE — pipeline Gemini + WHAM + SMPL→R15 code
+- ANIMA_MECHANICUS_ALPHA.ipynb : COMPLETE — notebook Colab 7 cellules cree
+- ANIMA_MECHANICUS_GAMMA.ipynb : COMPLETE — notebook Colab 4 cellules cree
 
 ---
 
 ## [NEXT_TASK]
 
-Réécrire `U-ALPHA/codebase/motus_extract.py` avec le pipeline Option C :
+Phase 5 — Validation imperiale :
 
-1. Module Gemini — analyse vidéo → JSON segments
-2. Module WHAM — estimation SMPL sur segments validés
-3. Module SMPL→R15 — retargeting 24 joints → 15 os R15
-4. Module lissage + interpolation FPS (conserver de l'ancienne version)
-5. Export .npz (conserver le contrat existant)
+1. Test "Danse" — 1 personne, corps complet face camera
+2. Test "Combat" — 2 personnes, occlusions partielles
+3. Test "Foule" — 4 personnes simultanees
+4. Test "Camera instable" — verifier warning root motion
+5. Test "Zoom" — verifier warning root motion fausse
+6. Import FBX dans Roblox Studio — validation finale animation
 
 ---
 
 ## [BLOCKERS]
 
-- Modèles SMPL (body_models/) nécessitent inscription gratuite sur mpg.de
-  → Documenter la procédure dans le notebook Colab
-- WHAM nécessite ffmpeg + torch + detectron2 sur Colab T4
-  → Prévoir cellule d'installation dans le notebook
+- Modeles SMPL (body_models/) necessitent inscription gratuite sur mpg.de
+  → Procedure documentee dans ANIMA_MECHANICUS_ALPHA.ipynb Cellule 1
+- WHAM necessite ffmpeg + torch + detectron2 + mmcv sur Colab T4
+  → Cellule d'installation complete dans ANIMA_MECHANICUS_ALPHA.ipynb
+- Template r15_template.blend non encore pousse dans le repo
+  → Necessaire pour que U-GAMMA fonctionne
 
 ---
 
 ## [SOLUTIONS]
 
-| Problème | Solution |
+| Probleme | Solution |
 |----------|---------|
-| Camera agitée → root motion faussé | Warning Gemini `camera.mouvement = agitee` + option désactivation root_position |
+| Camera agitee → root motion fausse | Warning Gemini `camera.mouvement = agitee` + option desactivation root_position |
 | Corps partiel → hallucination WHAM | Filtre Gemini `qualite_estimee < 0.6` → segment exclu automatiquement |
-| Occlusions courtes (<10 frames) | Interpolation linéaire scipy interp1d (conservé) |
-| SMPL 24 joints → R15 15 os | Mapping fixe défini dans le convertisseur |
-| Blender headless lent | Template R15 pré-chargé en .blend (inchangé U-GAMMA) |
-| Zoom vidéo → root motion faussé | Warning Gemini `camera.zoom_detecte = true` |
+| Occlusions courtes (<10 frames) | Interpolation lineaire scipy interp1d (integre dans motus_extract.py) |
+| SMPL 24 joints → R15 15 os | Mapping fixe defini dans le convertisseur |
+| Blender headless lent | Template R15 pre-charge en .blend (inchange U-GAMMA) |
+| Zoom video → root motion fausse | Warning Gemini `camera.zoom_detecte = true` |
 
 ---
 
@@ -61,6 +66,6 @@ Réécrire `U-ALPHA/codebase/motus_extract.py` avec le pipeline Option C :
 
 | Version | Architecture | Statut |
 |---------|-------------|--------|
-| V1 | 3 Frégates + BVH | Abandonné |
-| V2 | 2 Frégates + MediaPipe | Echoué (vidéos Roblox 3D incompatibles) |
-| V3 | 2 Frégates + Gemini + WHAM | En cours |
+| V1 | 3 Fregates + BVH | Abandonne |
+| V2 | 2 Fregates + MediaPipe | Echoue (videos Roblox 3D incompatibles) |
+| V3 | 2 Fregates + Gemini + WHAM | En cours — Phase 5 (Validation) |
