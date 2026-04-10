@@ -1,19 +1,39 @@
 #!/usr/bin/env python3
-"""MOTUS-VIGILUS — Frégate U-ALPHA : L'Auspex — Extraction de mouvement vidéo → .npz R15"""
+"""ANIMA-MECHANICUS — Frégate U-ALPHA : L'Auspex Cogitateur — v2
+Pipeline : Gemini 2.0 Flash (analyse) → WHAM (SMPL) → SMPL→R15 → .npz
 
-import sys, os, argparse, urllib.request
+Usage:
+    python motus_extract.py video.mp4 --gemini-key YOUR_KEY [options]
+
+Options:
+    --fps {30,60,120}                FPS cible (défaut: 30)
+    --smooth {faible,moyen,brutal}   Niveau lissage (défaut: moyen)
+    --no-root-motion                 Désactive la translation globale
+    --quality-threshold F            Score Gemini minimum (défaut: 0.6)
+    --output DIR                     Dossier de sortie (défaut: outputs/)
+    --wham-dir DIR                   Chemin vers le dépôt WHAM (défaut: ~/WHAM)
+"""
+
+import sys
+import os
+import json
+import argparse
+import subprocess
+import tempfile
+import pickle
+import time
 from pathlib import Path
+
 import numpy as np
 import cv2
-import mediapipe as mp
-from mediapipe.tasks import python as mp_tasks
-from mediapipe.tasks.python import vision
 from scipy.signal import savgol_filter
 from scipy.interpolate import interp1d
-from scenedetect import detect, ContentDetector
+from scipy.spatial.transform import Rotation as R
 
-MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task"
-MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pose_landmarker_heavy.task")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CONSTANTES
+# ──────────────────────────────────────────────────────────────────────────────
 
 BONE_NAMES = [
     "LowerTorso", "UpperTorso", "Head",
@@ -23,41 +43,34 @@ BONE_NAMES = [
     "RightUpperLeg", "RightLowerLeg", "RightFoot",
 ]
 
-BONE_DEFS = [
-    ("LowerTorso",    "mid_23_24", "mid_11_12"),
-    ("UpperTorso",    "mid_11_12", "upper_neck"),
-    ("Head",          "mid_9_10",  "pt_0"),
-    ("LeftUpperArm",  "pt_11", "pt_13"), ("LeftLowerArm",  "pt_13", "pt_15"),
-    ("LeftHand",      "pt_15", "pt_19"),
-    ("RightUpperArm", "pt_12", "pt_14"), ("RightLowerArm", "pt_14", "pt_16"),
-    ("RightHand",     "pt_16", "pt_20"),
-    ("LeftUpperLeg",  "pt_23", "pt_25"), ("LeftLowerLeg",  "pt_25", "pt_27"),
-    ("LeftFoot",      "pt_27", "pt_31"),
-    ("RightUpperLeg", "pt_24", "pt_26"), ("RightLowerLeg", "pt_26", "pt_28"),
-    ("RightFoot",     "pt_28", "pt_32"),
-]
-
-REST_VECTORS = {
-    "LowerTorso":    [ 0.000,  1.000,  0.000],
-    "UpperTorso":    [ 0.000,  1.000,  0.000],
-    "Head":          [ 0.000,  1.000,  0.000],
-    "LeftUpperArm":  [-0.589, -0.808,  0.000],
-    "LeftLowerArm":  [-0.547, -0.809,  0.213],
-    "LeftHand":      [-0.547, -0.809,  0.213],
-    "RightUpperArm": [ 0.589, -0.808,  0.000],
-    "RightLowerArm": [ 0.547, -0.809,  0.213],
-    "RightHand":     [ 0.547, -0.809,  0.213],
-    "LeftUpperLeg":  [-0.137, -0.990, -0.032],
-    "LeftLowerLeg":  [-0.118, -0.990, -0.072],
-    "LeftFoot":      [ 0.000,  0.000,  1.000],
-    "RightUpperLeg": [ 0.137, -0.990, -0.032],
-    "RightLowerLeg": [ 0.118, -0.990, -0.072],
-    "RightFoot":     [ 0.000,  0.000,  1.000],
+# Mapping SMPL joint index → nom os R15
+# SMPL 24 joints : 0=Pelvis, 1=L_Hip, 2=R_Hip, 3=Spine1, 4=L_Knee, 5=R_Knee,
+#                  6=Spine2, 7=L_Ankle, 8=R_Ankle, 9=Spine3, 10=L_Toe, 11=R_Toe,
+#                  12=Neck, 13=L_Collar, 14=R_Collar, 15=Head,
+#                  16=L_Shoulder, 17=R_Shoulder, 18=L_Elbow, 19=R_Elbow,
+#                  20=L_Wrist, 21=R_Wrist, 22=L_Hand, 23=R_Hand
+SMPL_TO_R15 = {
+    0:  "LowerTorso",
+    9:  "UpperTorso",     # Spine3 = sommet du torse
+    15: "Head",
+    16: "LeftUpperArm",
+    18: "LeftLowerArm",
+    20: "LeftHand",
+    17: "RightUpperArm",
+    19: "RightLowerArm",
+    21: "RightHand",
+    1:  "LeftUpperLeg",
+    4:  "LeftLowerLeg",
+    7:  "LeftFoot",
+    2:  "RightUpperLeg",
+    5:  "RightLowerLeg",
+    8:  "RightFoot",
 }
+
+R15_INDEX = {name: i for i, name in enumerate(BONE_NAMES)}
 
 SMOOTH_PRESETS = {"faible": (5, 2), "moyen": (7, 3), "brutal": (15, 3)}
 
-# Bones extremites sujets aux artefacts MediaPipe — lissage renforce systematiquement
 EXTREMITY_BONE_NAMES = {
     "LeftLowerArm", "LeftHand",
     "RightLowerArm", "RightHand",
@@ -66,70 +79,324 @@ EXTREMITY_BONE_NAMES = {
 }
 EXTREMITY_INDICES = [i for i, name in enumerate(BONE_NAMES) if name in EXTREMITY_BONE_NAMES]
 
+GEMINI_PROMPT = """Tu es un analyseur de vidéo expert en motion capture. Analyse cette vidéo et retourne UNIQUEMENT un JSON valide, sans markdown, sans explication.
 
-def ensure_model():
-    if not os.path.exists(MODEL_PATH):
-        print(f"[U-ALPHA] Téléchargement du modèle → {MODEL_PATH}")
-        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+Format attendu :
+{
+  "video_duration_seconds": <float>,
+  "source_fps": <int>,
+  "total_persons": <int>,
+  "persons": [
+    {
+      "person_id": <int>,
+      "segments_valides": [
+        {
+          "start_s": <float>,
+          "end_s": <float>,
+          "corps_visible": "<complet|partiel|tete_seulement>",
+          "orientation": "<face|profil|dos|mixte>",
+          "distance_camera": "<proche|moyen|lointain>",
+          "type_mouvement": "<marche|danse|combat|sport|statique>",
+          "qualite_estimee": <float 0.0-1.0>,
+          "problemes": []
+        }
+      ],
+      "segments_exclus": [
+        {
+          "start_s": <float>,
+          "end_s": <float>,
+          "raison": "<personne_absente|flou_mouvement|occlusion_totale|contre_jour>"
+        }
+      ]
+    }
+  ],
+  "camera": {
+    "mouvement": "<stable|panoramique|suivi|agitee>",
+    "zoom_detecte": <bool>
+  },
+  "qualite_globale": "<excellente|bonne|moyenne|mauvaise>",
+  "recommandation": "<string>"
+}
+
+Règles d'évaluation :
+- corps_visible "complet" : tête + torse + bras + jambes tous visibles
+- corps_visible "partiel" : au moins torse + 1 membre visible
+- qualite_estimee 1.0 = corps complet, face caméra, bonne lumière, sans flou
+- qualite_estimee 0.6 = minimum utilisable pour motion capture
+- qualite_estimee < 0.6 = mettre le segment dans segments_exclus
+- zoom_detecte true si la caméra zoome ou dé-zoome visiblement
+- Créer un person_id distinct par personne présente dans la vidéo
+"""
 
 
-def axis_map(v):
-    return np.array([-v[0], v[1], -v[2]])
+# ──────────────────────────────────────────────────────────────────────────────
+# MODULE 1 — ANALYSE GEMINI
+# ──────────────────────────────────────────────────────────────────────────────
+
+def analyze_video_gemini(video_path: str, api_key: str) -> dict:
+    """Envoie la vidéo à Gemini 2.0 Flash et retourne le JSON d'analyse."""
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        print("[U-ALPHA][Gemini] ERREUR : google-generativeai non installé.")
+        print("  Installer avec : pip install google-generativeai")
+        sys.exit(1)
+
+    genai.configure(api_key=api_key)
+
+    print("[U-ALPHA][Gemini] Upload vidéo en cours...")
+    video_file = genai.upload_file(path=video_path, mime_type="video/mp4")
+
+    while video_file.state.name == "PROCESSING":
+        print("[U-ALPHA][Gemini] Traitement vidéo sur les serveurs Google...")
+        time.sleep(3)
+        video_file = genai.get_file(video_file.name)
+
+    if video_file.state.name == "FAILED":
+        print("[U-ALPHA][Gemini] ERREUR : échec du traitement vidéo par Google.")
+        sys.exit(1)
+
+    print("[U-ALPHA][Gemini] Analyse en cours...")
+    model = genai.GenerativeModel("gemini-2.0-flash")
+    response = model.generate_content([video_file, GEMINI_PROMPT])
+
+    # Nettoyage si Gemini entoure le JSON de balises markdown
+    raw = response.text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    raw = raw.strip()
+
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"[U-ALPHA][Gemini] ERREUR parsing JSON : {e}")
+        print(f"  Réponse brute (500 premiers chars) : {raw[:500]}")
+        sys.exit(1)
+
+    genai.delete_file(video_file.name)
+    return result
 
 
-def resolve_point(lm, tag):
-    if tag == "mid_23_24":  return (lm[23] + lm[24]) / 2
-    if tag == "mid_11_12":  return (lm[11] + lm[12]) / 2
-    if tag == "mid_9_10":   return (lm[9] + lm[10]) / 2
-    if tag == "upper_neck":
-        mid_sh = (lm[11] + lm[12]) / 2
-        return mid_sh + np.array([0, 0.15, 0])
-    return lm[int(tag.split("_")[1])]
+def filter_segments(gemini_data: dict, min_quality: float = 0.6) -> list:
+    """Filtre les segments selon la qualité et retourne la liste à traiter."""
+    segments = []
+    for person in gemini_data.get("persons", []):
+        pid = person["person_id"]
+        for seg in person.get("segments_valides", []):
+            if seg["qualite_estimee"] < min_quality:
+                print(f"  [FILTRE] P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
+                      f"qualité {seg['qualite_estimee']:.2f} < {min_quality} → exclu")
+                continue
+            if seg["corps_visible"] == "tete_seulement":
+                print(f"  [FILTRE] P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
+                      f"corps non visible → exclu")
+                continue
+            if seg["corps_visible"] == "partiel":
+                print(f"  [WARN]   P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
+                      f"corps partiel — WHAM peut halluciner les membres manquants")
+            segments.append({"person_id": pid, **seg})
+    return segments
 
 
-def vec2quat(v_from, v_to):
-    v_from = v_from / (np.linalg.norm(v_from) + 1e-12)
-    v_to = v_to / (np.linalg.norm(v_to) + 1e-12)
-    cross = np.cross(v_from, v_to)
-    dot = np.dot(v_from, v_to)
-    if dot < -0.9999:
-        perp = np.array([1, 0, 0]) if abs(v_from[0]) < 0.9 else np.array([0, 1, 0])
-        axis = np.cross(v_from, perp)
-        axis /= np.linalg.norm(axis)
-        return np.array([0.0, axis[0], axis[1], axis[2]])
-    w = 1.0 + dot
-    q = np.array([w, cross[0], cross[1], cross[2]])
-    return q / np.linalg.norm(q)
+def print_gemini_report(gemini_data: dict) -> None:
+    """Affiche un résumé lisible du rapport Gemini."""
+    print("\n" + "=" * 60)
+    print("[U-ALPHA][Gemini] RAPPORT D'ANALYSE")
+    print("=" * 60)
+    print(f"  Durée         : {gemini_data.get('video_duration_seconds', '?')}s")
+    print(f"  FPS source    : {gemini_data.get('source_fps', '?')}")
+    print(f"  Personnes     : {gemini_data.get('total_persons', '?')}")
+    print(f"  Qualité       : {gemini_data.get('qualite_globale', '?')}")
+    cam = gemini_data.get("camera", {})
+    zoom_warn = " [ZOOM DÉTECTÉ — root motion peut être faussé]" if cam.get("zoom_detecte") else ""
+    print(f"  Caméra        : {cam.get('mouvement', '?')}{zoom_warn}")
+    if cam.get("mouvement") == "agitee":
+        print("  [WARN] Caméra agitée — root motion peu fiable")
+    print(f"\n  Recommandation : {gemini_data.get('recommandation', '')}")
+    print("=" * 60 + "\n")
 
 
-def landmarks_to_rotations(lm_mapped):
-    rots = np.zeros((len(BONE_DEFS), 4))
-    for i, (name, src, dst) in enumerate(BONE_DEFS):
-        p0, p1 = resolve_point(lm_mapped, src), resolve_point(lm_mapped, dst)
-        bone_vec = p1 - p0
-        if np.linalg.norm(bone_vec) < 1e-8:
-            rots[i] = [1, 0, 0, 0]
+# ──────────────────────────────────────────────────────────────────────────────
+# MODULE 2 — EXTRACTION WHAM
+# ──────────────────────────────────────────────────────────────────────────────
+
+def cut_video_segment(video_path: str, start_s: float, end_s: float, out_path: str) -> None:
+    """Découpe un segment vidéo avec ffmpeg."""
+    subprocess.run([
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", video_path,
+        "-ss", str(start_s),
+        "-to", str(end_s),
+        "-c", "copy", out_path
+    ], check=True)
+
+
+def _extract_wham_poses(data: dict):
+    """Extrait les poses SMPL axis-angle depuis le dict WHAM. Gère plusieurs formats."""
+    if "smpl" in data and "poses" in data["smpl"]:
+        return np.array(data["smpl"]["poses"]).reshape(-1, 24, 3)
+    if "poses" in data:
+        p = np.array(data["poses"])
+        if p.ndim == 2 and p.shape[1] == 72:
+            return p.reshape(-1, 24, 3)
+        if p.ndim == 3 and p.shape[1:] == (24, 3):
+            return p
+    if "pose_body" in data and "root_orient" in data:
+        root = np.array(data["root_orient"]).reshape(-1, 1, 3)
+        body = np.array(data["pose_body"]).reshape(-1, 23, 3)
+        return np.concatenate([root, body], axis=1)
+    return None
+
+
+def _extract_wham_transl(data: dict, n_frames: int) -> np.ndarray:
+    """Extrait la translation depuis le dict WHAM."""
+    for key in ["trans", "transl", "translation"]:
+        if key in data:
+            return np.array(data[key])
+        if "smpl" in data and key in data["smpl"]:
+            return np.array(data["smpl"][key])
+    return np.zeros((n_frames, 3))
+
+
+def run_wham(video_path: str, segments: list, wham_dir: str, tmp_dir: str) -> dict:
+    """
+    Appelle WHAM sur chaque segment validé et retourne les poses SMPL.
+    Retourne : {person_id: {"poses": {frame_idx: (24,3)}, "transl": {frame_idx: (3,)}}}
+    """
+    wham_dir = Path(wham_dir).expanduser()
+    if not wham_dir.exists():
+        print(f"[U-ALPHA][WHAM] ERREUR : dépôt WHAM introuvable → {wham_dir}")
+        print("  Installer avec :")
+        print("    git clone https://github.com/yohanshin/WHAM.git ~/WHAM")
+        print("    cd ~/WHAM && pip install -r requirements.txt")
+        sys.exit(1)
+
+    demo_script = wham_dir / "demo.py"
+    if not demo_script.exists():
+        print(f"[U-ALPHA][WHAM] ERREUR : demo.py introuvable dans {wham_dir}")
+        sys.exit(1)
+
+    cap = cv2.VideoCapture(video_path)
+    src_fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+
+    all_tracks = {}
+
+    for seg in segments:
+        pid = seg["person_id"]
+        start_s, end_s = seg["start_s"], seg["end_s"]
+        print(f"[U-ALPHA][WHAM] P{pid} — segment {start_s:.1f}s-{end_s:.1f}s")
+
+        seg_video = os.path.join(tmp_dir, f"seg_P{pid}_{int(start_s*10):06d}.mp4")
+        cut_video_segment(video_path, start_s, end_s, seg_video)
+
+        wham_out = os.path.join(tmp_dir, f"wham_P{pid}_{int(start_s*10):06d}")
+        os.makedirs(wham_out, exist_ok=True)
+
+        result = subprocess.run(
+            [sys.executable, str(demo_script),
+             "--video", seg_video,
+             "--output_pth", wham_out,
+             "--visualize", "false"],
+            cwd=str(wham_dir),
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print(f"[U-ALPHA][WHAM] ERREUR segment P{pid} {start_s:.1f}s : {result.stderr[-300:]}")
             continue
-        rest = np.array(REST_VECTORS[name], dtype=np.float64)
-        rots[i] = vec2quat(rest, bone_vec)
-    return rots
+
+        pkl_files = list(Path(wham_out).glob("*.pkl"))
+        if not pkl_files:
+            print(f"[U-ALPHA][WHAM] Aucun .pkl dans {wham_out} — segment ignoré")
+            continue
+
+        frame_offset = int(start_s * src_fps)
+
+        for pkl_file in pkl_files:
+            with open(pkl_file, "rb") as f:
+                wham_data = pickle.load(f)
+
+            poses = _extract_wham_poses(wham_data)
+            if poses is None:
+                print(f"  [WARN] Format WHAM inconnu dans {pkl_file.name}")
+                continue
+
+            transl = _extract_wham_transl(wham_data, len(poses))
+
+            if pid not in all_tracks:
+                all_tracks[pid] = {"poses": {}, "transl": {}}
+
+            for t in range(len(poses)):
+                all_tracks[pid]["poses"][frame_offset + t] = poses[t]
+                all_tracks[pid]["transl"][frame_offset + t] = transl[t]
+
+        n = len(all_tracks.get(pid, {}).get("poses", {}))
+        print(f"  OK — {n} frames accumulées pour P{pid}")
+
+    return all_tracks
 
 
-def smooth_array(data, window, poly, is_quat=False):
+# ──────────────────────────────────────────────────────────────────────────────
+# MODULE 3 — RETARGETING SMPL → R15
+# ──────────────────────────────────────────────────────────────────────────────
+
+def smpl_to_r15(poses_aa: np.ndarray, transl: np.ndarray) -> tuple:
+    """
+    Convertit les poses SMPL axis-angle → quaternions WXYZ R15 Roblox.
+
+    Args:
+        poses_aa : (N, 24, 3) axis-angle SMPL
+        transl   : (N, 3) translation monde SMPL
+
+    Returns:
+        rotations    : (N, 15, 4) quaternions WXYZ float32
+        root_position: (N, 3) float32
+    """
+    n = len(poses_aa)
+    rotations = np.zeros((n, 15, 4), dtype=np.float32)
+    rotations[:, :, 0] = 1.0  # identité w=1 par défaut
+
+    for smpl_idx, bone_name in SMPL_TO_R15.items():
+        r15_idx = R15_INDEX[bone_name]
+        aa = poses_aa[:, smpl_idx, :]  # (N, 3)
+
+        # Appliquer convention axes Roblox : X=-X, Z=-Z
+        aa_roblox = aa * np.array([-1.0, 1.0, -1.0])
+
+        rot = R.from_rotvec(aa_roblox)
+        q_xyzw = rot.as_quat()  # scipy retourne xyzw
+
+        # Convertir xyzw → wxyz (convention Roblox/MOTUS)
+        q_wxyz = np.concatenate([q_xyzw[:, 3:4], q_xyzw[:, :3]], axis=-1)
+        rotations[:, r15_idx, :] = q_wxyz.astype(np.float32)
+
+    # Translation : appliquer axes Roblox
+    root_position = transl * np.array([-1.0, 1.0, -1.0])
+    return rotations, root_position.astype(np.float32)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MODULE 4 — LISSAGE ET INTERPOLATION
+# ──────────────────────────────────────────────────────────────────────────────
+
+def smooth_array(data: np.ndarray, window: int, poly: int) -> np.ndarray:
     if len(data) < window:
         return data
     out = np.zeros_like(data)
     for i in range(data.shape[-1]):
         out[..., i] = savgol_filter(data[..., i], window, poly, axis=0)
-    if is_quat:
-        norms = np.linalg.norm(out.reshape(-1, 4), axis=1, keepdims=True)
-        out = (out.reshape(-1, 4) / (norms + 1e-12)).reshape(out.shape)
     return out
 
 
-def smooth_extremities(rots, window, poly=3):
-    """Passe de lissage renforcee sur les bones extremites (pieds, mains, avant-bras)."""
-    # window doit etre impair et >= poly+2
+def normalize_quats(rots: np.ndarray) -> np.ndarray:
+    norms = np.linalg.norm(rots, axis=-1, keepdims=True)
+    return rots / (norms + 1e-12)
+
+
+def smooth_extremities(rots: np.ndarray, window: int, poly: int = 3) -> np.ndarray:
+    """Lissage renforcé sur les os extrémités (mains, pieds, avant-bras)."""
     if window % 2 == 0:
         window += 1
     window = max(window, poly + 2)
@@ -137,17 +404,13 @@ def smooth_extremities(rots, window, poly=3):
         return rots
     rots_flat = rots.reshape(len(rots), -1).copy()
     for bi in EXTREMITY_INDICES:
-        col_s, col_e = bi * 4, bi * 4 + 4
-        rots_flat[:, col_s:col_e] = savgol_filter(
-            rots_flat[:, col_s:col_e], window, poly, axis=0
-        )
+        s, e = bi * 4, bi * 4 + 4
+        rots_flat[:, s:e] = savgol_filter(rots_flat[:, s:e], window, poly, axis=0)
     result = rots_flat.reshape(-1, len(BONE_NAMES), 4)
-    norms = np.linalg.norm(result, axis=-1, keepdims=True)
-    return result / (norms + 1e-12)
+    return normalize_quats(result)
 
 
-def temporal_resample(data, src_fps, tgt_fps):
-    """Ré-échantillonnage temporel : gère upscaling ET downscaling via interpolation cubique."""
+def temporal_resample(data: np.ndarray, src_fps: float, tgt_fps: int) -> np.ndarray:
     if src_fps == tgt_fps or len(data) < 2:
         return data
     n_src = len(data)
@@ -162,140 +425,141 @@ def temporal_resample(data, src_fps, tgt_fps):
     return interp1d(t_s, flat, axis=0, kind=kind)(t_t).reshape(n_tgt, *shape)
 
 
-def fill_gaps(tracks, max_gap=10):
-    for pid in tracks:
-        frames = tracks[pid]
-        indices = sorted(frames.keys())
-        if len(indices) < 2:
+def fill_gaps(poses_dict: dict, transl_dict: dict, max_gap: int = 10) -> None:
+    """Interpolation linéaire des trous d'occlusion (max_gap frames)."""
+    indices = sorted(poses_dict.keys())
+    if len(indices) < 2:
+        return
+    for a, b in zip(indices, indices[1:]):
+        gap = b - a
+        if gap <= 1 or gap > max_gap + 1:
             continue
-        for a, b in zip(indices, indices[1:]):
-            gap = b - a
-            if gap <= 1 or gap > max_gap + 1:
-                continue
-            for t in range(a + 1, b):
-                alpha = (t - a) / (b - a)
-                frames[t] = (1 - alpha) * frames[a] + alpha * frames[b]
+        for t in range(a + 1, b):
+            alpha = (t - a) / (b - a)
+            poses_dict[t] = (1 - alpha) * poses_dict[a] + alpha * poses_dict[b]
+            transl_dict[t] = (1 - alpha) * transl_dict[a] + alpha * transl_dict[b]
 
 
-def extract_scene(cap, start_f, end_f, landmarker, src_fps, tracks):
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
-    for fi in range(start_f, end_f):
-        ret, frame = cap.read()
-        if not ret:
-            break
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        ts = int(fi * 1000 / src_fps)
-        result = landmarker.detect_for_video(mp_img, ts)
-        n_people = len(result.pose_world_landmarks)
-        if fi % 50 == 0:
-            print(f"  Frame {fi}/{end_f} — {n_people} personne(s)")
-        for pid, wl in enumerate(result.pose_world_landmarks):
-            lm = np.array([[l.x, l.y, l.z] for l in wl])
-            lm_mapped = np.array([axis_map(v) for v in lm])
-            root = (lm_mapped[23] + lm_mapped[24]) / 2
-            rots = landmarks_to_rotations(lm_mapped)
-            tracks.setdefault(pid, {})[fi] = np.concatenate([root, rots.flatten()])
+# ──────────────────────────────────────────────────────────────────────────────
+# MODULE 5 — EXPORT .npz
+# ──────────────────────────────────────────────────────────────────────────────
 
+def export_npz(rots: np.ndarray, root_pos: np.ndarray, fps: int,
+               src_fps: float, duration: float, person_index: int,
+               total_persons: int, out_path: str) -> None:
+    np.savez(
+        out_path,
+        rotations=rots.astype(np.float32),
+        root_position=root_pos.astype(np.float32),
+        bone_names=np.array(BONE_NAMES),
+        fps=np.int32(fps),
+        duration=np.float64(duration),
+        source_fps=np.int32(int(src_fps)),
+        person_index=np.int32(person_index),
+        total_persons=np.int32(total_persons),
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ──────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="MOTUS-VIGILUS — Frégate U-ALPHA : L'Auspex")
-    parser.add_argument("input", help="Chemin vidéo .mp4")
-    parser.add_argument("-o", "--output", default="outputs/", help="Dossier de sortie")
-    parser.add_argument("--fps", type=int, default=30, choices=[30, 60, 120], help="FPS cible")
-    parser.add_argument("--smooth", default="moyen", choices=["faible", "moyen", "brutal"])
-    parser.add_argument("--no-root-motion", action="store_true", help="Désactive root motion")
+    parser = argparse.ArgumentParser(
+        description="ANIMA-MECHANICUS — Frégate U-ALPHA : L'Auspex Cogitateur"
+    )
+    parser.add_argument("input", help="Chemin vidéo .mp4 (humain réel uniquement)")
+    parser.add_argument("--gemini-key", required=True,
+                        help="Clé API Gemini (gratuite sur aistudio.google.com)")
+    parser.add_argument("-o", "--output", default="outputs/")
+    parser.add_argument("--fps", type=int, default=30, choices=[30, 60, 120])
+    parser.add_argument("--smooth", default="moyen",
+                        choices=["faible", "moyen", "brutal"])
+    parser.add_argument("--no-root-motion", action="store_true")
+    parser.add_argument("--quality-threshold", type=float, default=0.6)
+    parser.add_argument("--wham-dir", default="~/WHAM")
     args = parser.parse_args()
 
     if not os.path.isfile(args.input):
-        print(f"[ERREUR] Fichier introuvable : {args.input}"); sys.exit(1)
+        print(f"[ERREUR] Fichier introuvable : {args.input}")
+        sys.exit(1)
 
     cap = cv2.VideoCapture(args.input)
     if not cap.isOpened():
-        print(f"[ERREUR] Impossible d'ouvrir la vidéo : {args.input}"); sys.exit(1)
-
+        print(f"[ERREUR] Impossible d'ouvrir la vidéo : {args.input}")
+        sys.exit(1)
     src_fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = total_frames / src_fps
+    cap.release()
     print(f"[U-ALPHA] Vidéo : {total_frames} frames, {src_fps:.1f} FPS, {duration:.1f}s")
 
-    print("[U-ALPHA] Détection de scènes...")
-    scenes = detect(args.input, ContentDetector(threshold=27.0))
-    if not scenes:
-        scenes = [(0, total_frames)]
-    else:
-        scenes = [(s[0].get_frames(), s[1].get_frames()) for s in scenes]
-    print(f"  {len(scenes)} scène(s) détectée(s)")
+    # ── Etape 1 : Analyse Gemini ─────────────────────────────────────────────
+    print("\n[U-ALPHA] Etape 1/4 — Analyse Gemini 2.0 Flash...")
+    gemini_data = analyze_video_gemini(args.input, args.gemini_key)
+    print_gemini_report(gemini_data)
 
-    ensure_model()
-    options = vision.PoseLandmarkerOptions(
-        base_options=mp_tasks.BaseOptions(model_asset_path=MODEL_PATH),
-        running_mode=vision.RunningMode.VIDEO,
-        num_poses=4,
-        min_pose_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-        output_segmentation_masks=False,
-    )
-    landmarker = vision.PoseLandmarker.create_from_options(options)
+    segments = filter_segments(gemini_data, args.quality_threshold)
+    if not segments:
+        print("[ERREUR] Aucun segment valide après filtrage Gemini.")
+        print("  Vérifier que la vidéo contient un humain réel clairement visible.")
+        sys.exit(1)
+    print(f"[U-ALPHA] {len(segments)} segment(s) retenu(s) pour WHAM")
 
-    tracks = {}
-    print("[U-ALPHA] Extraction des poses...")
-    for si, (sf, ef) in enumerate(scenes):
-        print(f"  Scène {si + 1}/{len(scenes)} [{sf}→{ef}]")
-        extract_scene(cap, sf, ef, landmarker, src_fps, tracks)
-    cap.release()
-    landmarker.close()
+    # ── Etape 2 : Extraction WHAM ────────────────────────────────────────────
+    print("\n[U-ALPHA] Etape 2/4 — Extraction WHAM (poses SMPL)...")
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        wham_tracks = run_wham(args.input, segments, args.wham_dir, tmp_dir)
 
-    if not tracks:
-        print("[ERREUR] Aucune personne détectée dans la vidéo."); sys.exit(1)
+    if not wham_tracks:
+        print("[ERREUR] WHAM n'a produit aucun résultat.")
+        sys.exit(1)
 
-    fill_gaps(tracks)
-    win, poly = SMOOTH_PRESETS[args.smooth]
     os.makedirs(args.output, exist_ok=True)
-    n_persons = len(tracks)
-    print(f"[U-ALPHA] {n_persons} personne(s) — lissage '{args.smooth}', cible {args.fps} FPS")
+    n_persons = len(wham_tracks)
+    win, poly = SMOOTH_PRESETS[args.smooth]
+    print(f"\n[U-ALPHA] Etapes 3-4/4 — SMPL→R15 + Lissage + Export ({n_persons} personne(s))...")
 
-    for pid in sorted(tracks.keys()):
-        frames = tracks[pid]
-        indices = sorted(frames.keys())
-        raw = np.array([frames[i] for i in indices])
-        root_pos = raw[:, :3]
-        rots = raw[:, 3:].reshape(len(raw), 15, 4)
+    # ── Etapes 3-4 : Retargeting + Lissage + Export ──────────────────────────
+    for pid in sorted(wham_tracks.keys()):
+        track = wham_tracks[pid]
+        poses_dict = track["poses"]
+        transl_dict = track["transl"]
+
+        fill_gaps(poses_dict, transl_dict)
+
+        indices = sorted(poses_dict.keys())
+        poses_aa = np.array([poses_dict[i] for i in indices])  # (N, 24, 3)
+        transl = np.array([transl_dict[i] for i in indices])   # (N, 3)
+
+        # Retargeting SMPL → R15
+        rots, root_pos = smpl_to_r15(poses_aa, transl)
 
         if args.no_root_motion:
             root_pos = np.zeros_like(root_pos)
 
-        # Lissage principal (tous les bones)
+        # Lissage global
         root_pos = smooth_array(root_pos, win, poly)
         rots = smooth_array(rots.reshape(len(rots), -1), win, poly).reshape(-1, 15, 4)
-        norms = np.linalg.norm(rots, axis=-1, keepdims=True)
-        rots = rots / (norms + 1e-12)
+        rots = normalize_quats(rots)
 
-        # Lissage renforce sur les extremites (window = max(win*2, 15))
+        # Lissage renforcé extrémités
         ext_win = max(win * 2 + 1, 15)
         rots = smooth_extremities(rots, ext_win)
 
-        # Ré-échantillonnage temporel (upscaling ET downscaling corrigé)
+        # Resampling FPS
         root_pos = temporal_resample(root_pos, src_fps, args.fps)
-        rots = temporal_resample(rots.reshape(len(rots), -1), src_fps, args.fps).reshape(-1, 15, 4)
-        norms = np.linalg.norm(rots, axis=-1, keepdims=True)
-        rots = rots / (norms + 1e-12)
+        rots = temporal_resample(
+            rots.reshape(len(rots), -1), src_fps, args.fps
+        ).reshape(-1, 15, 4)
+        rots = normalize_quats(rots)
 
         out_path = os.path.join(args.output, f"motus_core_P{pid}.npz")
-        np.savez(
-            out_path,
-            rotations=rots.astype(np.float32),
-            root_position=root_pos.astype(np.float32),
-            bone_names=np.array(BONE_NAMES),
-            fps=np.int32(args.fps),
-            duration=np.float64(duration),
-            source_fps=np.int32(int(src_fps)),
-            person_index=np.int32(pid),
-            total_persons=np.int32(n_persons),
-        )
-        print(f"  → {out_path} ({rots.shape[0]} frames)")
+        export_npz(rots, root_pos, args.fps, src_fps, duration, pid, n_persons, out_path)
+        print(f"  → {out_path} ({rots.shape[0]} frames @ {args.fps} FPS)")
 
-    print(f"[U-ALPHA] Extraction terminée — {n_persons} fichier(s) .npz exporté(s)")
+    print(f"\n[U-ALPHA] Extraction terminée — {n_persons} fichier(s) .npz exporté(s)")
+    print("[U-ALPHA] Prêt pour la Frégate U-GAMMA")
 
 
 if __name__ == "__main__":
