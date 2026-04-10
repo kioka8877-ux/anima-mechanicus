@@ -1,42 +1,39 @@
 #!/usr/bin/env python3
-"""MOTUS-VIGILUS — Frégate U-GAMMA : La Forge — v3 FIX FINAL
+"""ANIMA-MECHANICUS — Fregate U-GAMMA : La Forge — v4 (rig programmatique)
 Conversion .npz → .fbx via Blender headless
 
-DIAGNOSTIC COMPLET :
-  U-ALPHA stocke des rotations MONDE : Q_world = vec2quat(rest_vector, observed_bone_dir)
-  motus_forge v1/v2 les appliquait comme LOCAL → chaque bone hérite parent + se re-tourne
-  → "atomes volants" en cascade
+Changement v4 : Plus de dependance a r15_template.blend
+Le rig R15 est cree programmatiquement (T-pose, 15 os, hierarchie correcte).
 
-FIX :
-  1. root_position → root bone (pas l'objet armature)
-  2. Conversion world→local avant application sur chaque pose bone
-     local_i = inv(world_parent_i) @ world_i
+Usage:
+    blender --background --python motus_forge.py -- input.npz output.fbx
 """
 
 import bpy
 import sys
 import numpy as np
-from mathutils import Quaternion, Vector
+from mathutils import Quaternion, Vector, Matrix
 
+# ── Arguments ─────────────────────────────────────────────────────────────────
 argv = sys.argv[sys.argv.index("--") + 1:]
 if len(argv) < 2:
-    print("[ERREUR] Usage: blender -b template.blend -P motus_forge.py -- input.npz output.fbx")
+    print("[ERREUR] Usage: blender --background --python motus_forge.py -- input.npz output.fbx")
     sys.exit(1)
 
 npz_path = argv[0]
 fbx_path = argv[1]
 
+# ── Chargement .npz ────────────────────────────────────────────────────────────
 print(f"[U-GAMMA] Chargement : {npz_path}")
 data = np.load(npz_path, allow_pickle=True)
-rotations     = data["rotations"]
-root_position = data["root_position"]
-bone_names    = data["bone_names"]
+rotations     = data["rotations"]      # (N, 15, 4) quaternions WXYZ
+root_position = data["root_position"]  # (N, 3)
+bone_names    = [str(b) for b in data["bone_names"]]
 fps           = int(data["fps"])
 n_frames      = len(rotations)
 print(f"[U-GAMMA] {n_frames} frames @ {fps} FPS — {len(bone_names)} bones")
 
-# ── Hiérarchie parent .npz (R15 sans le bone Root du template) ─────────────
-# LowerTorso est la racine de mouvement (son parent Blender = Root, toujours identity)
+# ── Hierarchie parent (doit correspondre au contrat .npz de U-ALPHA) ───────────
 NPZ_PARENT = {
     'LowerTorso':    None,
     'UpperTorso':    'LowerTorso',
@@ -55,116 +52,127 @@ NPZ_PARENT = {
     'RightFoot':     'RightLowerLeg',
 }
 
+# ── Definition du rig R15 (T-pose, LowerTorso a l'origine) ─────────────────────
+# Format : (nom, head_xyz, tail_xyz, parent_nom, use_connect)
+# LowerTorso tete a (0,0,0) : root_position s'applique directement comme offset
+BONE_DEFS = [
+    # Colonne vertebrale
+    ('LowerTorso',    ( 0.00,  0,  0.00), ( 0.00,  0,  0.20), None,           False),
+    ('UpperTorso',    ( 0.00,  0,  0.20), ( 0.00,  0,  0.50), 'LowerTorso',   True ),
+    ('Head',          ( 0.00,  0,  0.60), ( 0.00,  0,  0.85), 'UpperTorso',   False),
+    # Bras gauche (X positif = gauche personnage)
+    ('LeftUpperArm',  ( 0.15,  0,  0.48), ( 0.42,  0,  0.48), 'UpperTorso',   False),
+    ('LeftLowerArm',  ( 0.42,  0,  0.48), ( 0.67,  0,  0.48), 'LeftUpperArm', True ),
+    ('LeftHand',      ( 0.67,  0,  0.48), ( 0.82,  0,  0.48), 'LeftLowerArm', True ),
+    # Bras droit
+    ('RightUpperArm', (-0.15,  0,  0.48), (-0.42,  0,  0.48), 'UpperTorso',   False),
+    ('RightLowerArm', (-0.42,  0,  0.48), (-0.67,  0,  0.48), 'RightUpperArm',True ),
+    ('RightHand',     (-0.67,  0,  0.48), (-0.82,  0,  0.48), 'RightLowerArm',True ),
+    # Jambe gauche
+    ('LeftUpperLeg',  ( 0.10,  0,  0.00), ( 0.10,  0, -0.40), 'LowerTorso',   False),
+    ('LeftLowerLeg',  ( 0.10,  0, -0.40), ( 0.10,  0, -0.80), 'LeftUpperLeg', True ),
+    ('LeftFoot',      ( 0.10,  0, -0.80), ( 0.10,  0.12, -0.92), 'LeftLowerLeg',True ),
+    # Jambe droite
+    ('RightUpperLeg', (-0.10,  0,  0.00), (-0.10,  0, -0.40), 'LowerTorso',   False),
+    ('RightLowerLeg', (-0.10,  0, -0.40), (-0.10,  0, -0.80), 'RightUpperLeg',True ),
+    ('RightFoot',     (-0.10,  0, -0.80), (-0.10,  0.12, -0.92), 'RightLowerLeg',True ),
+]
 
-def find_bone(armature, name):
-    pose_bones = armature.pose.bones
-    if name in pose_bones:
-        return pose_bones[name]
-    norm = name.lower().replace(" ", "").replace("_", "")
-    for pb in pose_bones:
-        if pb.name.lower().replace(" ", "").replace("_", "") == norm:
-            return pb
-    return None
+# ── Nettoyage de la scene par defaut ──────────────────────────────────────────
+print("[U-GAMMA] Initialisation scene Blender...")
+bpy.ops.object.select_all(action='SELECT')
+bpy.ops.object.delete(use_global=False)
 
+# ── Creation de l'armature R15 ────────────────────────────────────────────────
+print("[U-GAMMA] Creation rig R15...")
+arm_data = bpy.data.armatures.new("R15_Armature")
+arm_obj  = bpy.data.objects.new("R15", arm_data)
+bpy.context.collection.objects.link(arm_obj)
+bpy.context.view_layer.objects.active = arm_obj
+arm_obj.select_set(True)
 
-# ── Trouver l'armature ──────────────────────────────────────────────────────
-armature = None
-for obj in bpy.data.objects:
-    if obj.type == 'ARMATURE':
-        armature = obj
-        break
+# Entrer en mode EDIT pour creer les bones
+bpy.ops.object.mode_set(mode='EDIT')
+eb = arm_data.edit_bones
 
-if not armature:
-    print("[ERREUR] Aucune armature trouvée dans le template")
-    sys.exit(1)
-
-print(f"[U-GAMMA] Armature : {armature.name} ({len(armature.pose.bones)} bones)")
-
-# Armature fixe à l'origine — tout le mouvement passe par les bones
-armature.location = Vector((0.0, 0.0, 0.0))
-armature.rotation_euler = (0.0, 0.0, 0.0)
-armature.scale = (1.0, 1.0, 1.0)
-
-# ── Mapper les bones ────────────────────────────────────────────────────────
-bone_map = {}
-missing  = []
-for bname in bone_names:
-    pb = find_bone(armature, str(bname))
-    if pb:
-        bone_map[str(bname)] = pb
+for (name, head, tail, parent_name, use_connect) in BONE_DEFS:
+    bone = eb.new(name)
+    bone.head = Vector(head)
+    bone.tail = Vector(tail)
+    bone.use_deform = True
+    if parent_name:
+        bone.parent = eb[parent_name]
+        bone.use_connect = use_connect
     else:
-        missing.append(str(bname))
+        bone.use_connect = False
 
-if missing:
-    print(f"[WARN] Bones manquants : {missing}")
-print(f"[U-GAMMA] {len(bone_map)}/{len(bone_names)} bones mappés")
+bpy.ops.object.mode_set(mode='OBJECT')
+print(f"[U-GAMMA] Rig R15 cree : {len(arm_data.bones)} bones")
 
-# ── Identifier le bone racine pour root_position ───────────────────────────
-ROOT_CANDIDATES = ["HumanoidRootNode", "Root", "root", "HumanoidRootPart", "Hips", "hips", "Pelvis", "LowerTorso"]
-root_bone = None
-for c in ROOT_CANDIDATES:
-    root_bone = find_bone(armature, c)
-    if root_bone:
-        print(f"[U-GAMMA] Root bone : {root_bone.name}")
-        break
-
-# ── Paramètres de scène ─────────────────────────────────────────────────────
+# ── Parametres de scene ────────────────────────────────────────────────────────
 bpy.context.scene.frame_start = 1
 bpy.context.scene.frame_end   = n_frames
 bpy.context.scene.render.fps  = fps
 
-bpy.context.view_layer.objects.active = armature
-armature.select_set(True)
+arm_obj.location = Vector((0.0, 0.0, 0.0))
+arm_obj.rotation_euler = (0.0, 0.0, 0.0)
+arm_obj.scale = (1.0, 1.0, 1.0)
 
-# ── Boucle principale ───────────────────────────────────────────────────────
-bone_name_list = [str(b) for b in bone_names]
-bone_idx_map   = {n: i for i, n in enumerate(bone_name_list)}
+# ── Index des bones ────────────────────────────────────────────────────────────
+bone_idx_map = {name: i for i, name in enumerate(bone_names)}
+
+# ── Boucle principale : application des keyframes ────────────────────────────
+print(f"[U-GAMMA] Application des {n_frames} frames...")
 
 for frame_idx in range(n_frames):
     bpy.context.scene.frame_set(frame_idx + 1)
 
-    # root_position → root bone (FIX v2)
-    if root_bone is not None:
+    # Root position → LowerTorso (offset depuis sa position de repos)
+    lt = arm_obj.pose.bones.get('LowerTorso')
+    if lt is not None:
         pos = root_position[frame_idx]
-        root_bone.location = Vector((float(pos[0]), float(pos[1]), float(pos[2])))
-        root_bone.keyframe_insert(data_path="location", frame=frame_idx + 1)
+        lt.location = Vector((float(pos[0]), float(pos[1]), float(pos[2])))
+        lt.keyframe_insert(data_path="location", frame=frame_idx + 1)
 
-    # Construire le dict des rotations MONDE pour cette frame
+    # Rotations monde pour cette frame
     world_quats = {}
-    for bname in bone_name_list:
-        idx = bone_idx_map[bname]
+    for bname in bone_names:
+        idx = bone_idx_map.get(bname)
+        if idx is None:
+            continue
         w, x, y, z = rotations[frame_idx, idx]
         world_quats[bname] = Quaternion((float(w), float(x), float(y), float(z)))
 
-    # Appliquer en LOCAL : local_i = inv(world_parent_i) @ world_i  (FIX v3)
-    for bname in bone_name_list:
-        pb = bone_map.get(bname)
+    # Conversion world → local et application (FIX v3 conserve)
+    for bname in bone_names:
+        pb = arm_obj.pose.bones.get(bname)
         if pb is None:
             continue
 
-        world_q  = world_quats[bname]
-        parent_n = NPZ_PARENT.get(bname)
+        world_q  = world_quats.get(bname)
+        if world_q is None:
+            continue
 
+        parent_n = NPZ_PARENT.get(bname)
         if parent_n and parent_n in world_quats:
             parent_q = world_quats[parent_n]
             local_q  = parent_q.inverted() @ world_q
         else:
-            # Bone racine : local = world (parent du .npz = Root = identity)
             local_q = world_q
 
         pb.rotation_mode = 'QUATERNION'
         pb.rotation_quaternion = local_q
         pb.keyframe_insert(data_path="rotation_quaternion", frame=frame_idx + 1)
 
-    if frame_idx % 100 == 0:
-        print(f"[U-GAMMA] Frame {frame_idx + 1}/{n_frames}")
+    if (frame_idx + 1) % 100 == 0 or frame_idx == n_frames - 1:
+        print(f"  Frame {frame_idx + 1}/{n_frames}")
 
-# ── Export FBX ──────────────────────────────────────────────────────────────
+# ── Export FBX ────────────────────────────────────────────────────────────────
 print(f"[U-GAMMA] Export FBX → {fbx_path}")
 bpy.ops.export_scene.fbx(
     filepath=fbx_path,
     use_selection=False,
-    object_types={'ARMATURE', 'MESH'},
+    object_types={'ARMATURE'},
     bake_anim=True,
     bake_anim_use_all_bones=True,
     bake_anim_use_nla_strips=False,
@@ -177,4 +185,4 @@ bpy.ops.export_scene.fbx(
     secondary_bone_axis='X',
     bake_space_transform=False,
 )
-print(f"[U-GAMMA] Forge terminée — {fbx_path}")
+print(f"[U-GAMMA] Forge terminee — {fbx_path}")
