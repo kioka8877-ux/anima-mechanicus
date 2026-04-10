@@ -62,18 +62,20 @@
 
 ## PHASE 4 : NOTEBOOK COLAB U-GAMMA [TERMINEE]
 
-- [x] Renommer en ANIMA_MECHANICUS_GAMMA.ipynb
-- [x] Cellule installation Blender headless
-- [x] Cellule upload .npz
-- [x] Cellule forge FBX
-- [x] Cellule telechargement .fbx
+- [x] motus_forge.py v4 — rig R15 genere programmatiquement (plus de r15_template.blend)
+- [x] Cellule 1 : Installation Blender headless
+- [x] Cellule 2 : Upload .npz
+- [x] Cellule 3 : Forge FBX (sans template, rig auto-genere)
+- [x] Cellule 4 : Telechargement .fbx
 
 ---
 
-## PHASE 5 : VALIDATION IMPERIALE [A FAIRE]
+## PHASE 5 : VALIDATION IMPERIALE [EN COURS]
 
-- [ ] Pousser r15_template.blend dans U-GAMMA/templates/ (prerequis U-GAMMA)
 - [ ] Test "Danse" — 1 personne, corps complet face camera
+- [ ] Verifier rapport Gemini : segments detectes correctement
+- [ ] Verifier .npz : shapes (N,15,4), (N,3), pas de NaN
+- [ ] Verifier .fbx forge sans erreur Blender
 - [ ] Test "Combat" — 2 personnes, occlusions partielles
 - [ ] Test "Foule" — 4 personnes simultanees
 - [ ] Test "Camera instable" — verifier warning root motion
@@ -87,4 +89,4 @@
 | Version | Raison de l'abandon |
 |---------|---------------------|
 | V1 — 3 Fregates + BVH | Sur-ingenierie, format BVH inutile pour Roblox |
-| V2 — MediaPipe | MediaPipe entraine sur humains reels : echoue totalement sur avatars Roblox 3D (cas d'usage initial incorrect) |
+| V2 — MediaPipe | MediaPipe entraine sur humains reels : echoue totalement sur avatars Roblox 3D |
