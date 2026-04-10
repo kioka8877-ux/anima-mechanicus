@@ -133,36 +133,71 @@ Règles d'évaluation :
 # MODULE 1 — ANALYSE GEMINI
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _pick_best_gemini_model(client) -> str:
+    """
+    Detecte automatiquement le meilleur modele Gemini disponible.
+    Priorite : pro > flash, version la plus recente en premier.
+    """
+    # Liste de priorite decroissante — mise a jour automatique via l'API
+    PRIORITY = [
+        "gemini-2.5-pro",
+        "gemini-2.5-pro-preview",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-preview",
+        "gemini-2.0-pro",
+        "gemini-2.0-pro-exp",
+        "gemini-2.0-flash-exp",
+        "gemini-2.0-flash",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash",
+    ]
+    try:
+        available = [m.name.replace("models/", "") for m in client.models.list()]
+        for candidate in PRIORITY:
+            # Cherche une correspondance exacte ou par prefixe
+            matches = [m for m in available if m == candidate or m.startswith(candidate + "-")]
+            if matches:
+                chosen = sorted(matches)[-1]  # plus recent en dernier alphabetiquement
+                print(f"[U-ALPHA][Gemini] Modele selectionne : {chosen}")
+                return chosen
+    except Exception as e:
+        print(f"[U-ALPHA][Gemini] Impossible de lister les modeles ({e}) — fallback gemini-1.5-pro")
+    return "gemini-1.5-pro"
+
+
 def analyze_video_gemini(video_path: str, api_key: str) -> dict:
-    """Envoie la vidéo à Gemini 2.0 Flash et retourne le JSON d'analyse."""
+    """Envoie la video a Gemini (meilleur modele disponible) et retourne le JSON d'analyse."""
     try:
         from google import genai
         from google.genai import types as genai_types
     except ImportError:
-        print("[U-ALPHA][Gemini] ERREUR : google-genai non installé.")
+        print("[U-ALPHA][Gemini] ERREUR : google-genai non installe.")
         print("  Installer avec : pip install -U google-genai")
         sys.exit(1)
 
     client = genai.Client(api_key=api_key)
 
-    print("[U-ALPHA][Gemini] Upload vidéo en cours...")
+    # Selection automatique du meilleur modele disponible
+    model_id = _pick_best_gemini_model(client)
+
+    print("[U-ALPHA][Gemini] Upload video en cours...")
     video_file = client.files.upload(
         file=video_path,
         config=genai_types.UploadFileConfig(mime_type="video/mp4")
     )
 
     while video_file.state.name == "PROCESSING":
-        print("[U-ALPHA][Gemini] Traitement vidéo sur les serveurs Google...")
+        print("[U-ALPHA][Gemini] Traitement video sur les serveurs Google...")
         time.sleep(3)
         video_file = client.files.get(name=video_file.name)
 
     if video_file.state.name == "FAILED":
-        print("[U-ALPHA][Gemini] ERREUR : échec du traitement vidéo par Google.")
+        print("[U-ALPHA][Gemini] ERREUR : echec du traitement video par Google.")
         sys.exit(1)
 
-    print("[U-ALPHA][Gemini] Analyse en cours...")
+    print(f"[U-ALPHA][Gemini] Analyse en cours avec {model_id}...")
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model=model_id,
         contents=[video_file, GEMINI_PROMPT]
     )
 
@@ -178,7 +213,7 @@ def analyze_video_gemini(video_path: str, api_key: str) -> dict:
         result = json.loads(raw)
     except json.JSONDecodeError as e:
         print(f"[U-ALPHA][Gemini] ERREUR parsing JSON : {e}")
-        print(f"  Réponse brute (500 premiers chars) : {raw[:500]}")
+        print(f"  Reponse brute (500 premiers chars) : {raw[:500]}")
         sys.exit(1)
 
     client.files.delete(name=video_file.name)
