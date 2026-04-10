@@ -136,29 +136,35 @@ Règles d'évaluation :
 def analyze_video_gemini(video_path: str, api_key: str) -> dict:
     """Envoie la vidéo à Gemini 2.0 Flash et retourne le JSON d'analyse."""
     try:
-        import google.generativeai as genai
+        from google import genai
+        from google.genai import types as genai_types
     except ImportError:
-        print("[U-ALPHA][Gemini] ERREUR : google-generativeai non installé.")
-        print("  Installer avec : pip install google-generativeai")
+        print("[U-ALPHA][Gemini] ERREUR : google-genai non installé.")
+        print("  Installer avec : pip install -U google-genai")
         sys.exit(1)
 
-    genai.configure(api_key=api_key)
+    client = genai.Client(api_key=api_key)
 
     print("[U-ALPHA][Gemini] Upload vidéo en cours...")
-    video_file = genai.upload_file(path=video_path, mime_type="video/mp4")
+    video_file = client.files.upload(
+        file=video_path,
+        config=genai_types.UploadFileConfig(mime_type="video/mp4")
+    )
 
     while video_file.state.name == "PROCESSING":
         print("[U-ALPHA][Gemini] Traitement vidéo sur les serveurs Google...")
         time.sleep(3)
-        video_file = genai.get_file(video_file.name)
+        video_file = client.files.get(name=video_file.name)
 
     if video_file.state.name == "FAILED":
         print("[U-ALPHA][Gemini] ERREUR : échec du traitement vidéo par Google.")
         sys.exit(1)
 
     print("[U-ALPHA][Gemini] Analyse en cours...")
-    model = genai.GenerativeModel("gemini-2.0-flash")
-    response = model.generate_content([video_file, GEMINI_PROMPT])
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=[video_file, GEMINI_PROMPT]
+    )
 
     # Nettoyage si Gemini entoure le JSON de balises markdown
     raw = response.text.strip()
@@ -175,7 +181,7 @@ def analyze_video_gemini(video_path: str, api_key: str) -> dict:
         print(f"  Réponse brute (500 premiers chars) : {raw[:500]}")
         sys.exit(1)
 
-    genai.delete_file(video_file.name)
+    client.files.delete(name=video_file.name)
     return result
 
 
