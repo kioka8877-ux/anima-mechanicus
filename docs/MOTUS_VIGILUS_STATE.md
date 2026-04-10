@@ -2,7 +2,7 @@
 
 | Champ | Valeur |
 |-------|--------|
-| STATUS | Phase 4 — En cours (Notebooks Colab a valider) |
+| STATUS | Phase 5 — En cours (Validation imperiale) |
 | DATE | Avril 2026 |
 | ARCHITECTURE | 2 Fregates (U-ALPHA + U-GAMMA) |
 | VERSION | V3 — Option C : Gemini 2.0 Flash + WHAM + SMPL→R15 |
@@ -14,14 +14,12 @@
 ## [LAST_WORK]
 
 - Projet renomme ANIMA-MECHANICUS (WH40K lore)
-- Depot GitHub cree : kioka8877-ux/ANIMA-MECHANICUS
 - Architecture pivot : MediaPipe abandonne → Gemini 2.0 Flash + WHAM + SMPL→R15
-- README v2 redige avec pipeline complet Option C
-- Contrat JSON Gemini defini et documente (segments, qualite, camera, warnings)
-- U-GAMMA (motus_forge.py v3) : fonctionnel, inchange
-- motus_extract.py v2 : COMPLETE — pipeline Gemini + WHAM + SMPL→R15 code
-- ANIMA_MECHANICUS_ALPHA.ipynb : COMPLETE — notebook Colab 7 cellules cree
-- ANIMA_MECHANICUS_GAMMA.ipynb : COMPLETE — notebook Colab 4 cellules cree
+- motus_extract.py v2 : COMPLETE — pipeline Gemini + WHAM + SMPL→R15
+- ANIMA_MECHANICUS_ALPHA.ipynb : COMPLETE — notebook Colab 7 cellules
+- motus_forge.py v4 : COMPLETE — rig R15 genere programmatiquement (plus de r15_template.blend)
+- ANIMA_MECHANICUS_GAMMA.ipynb : COMPLETE — notebook Colab 4 cellules, sans template
+- Toutes les dependances externes eliminees (pipeline 100% autonome)
 
 ---
 
@@ -29,12 +27,12 @@
 
 Phase 5 — Validation imperiale :
 
-1. Test "Danse" — 1 personne, corps complet face camera
-2. Test "Combat" — 2 personnes, occlusions partielles
-3. Test "Foule" — 4 personnes simultanees
-4. Test "Camera instable" — verifier warning root motion
-5. Test "Zoom" — verifier warning root motion fausse
-6. Import FBX dans Roblox Studio — validation finale animation
+1. Ouvrir ANIMA_MECHANICUS_ALPHA.ipynb sur Colab T4
+2. Test "Danse" — 1 personne, corps complet face camera
+3. Verifier les .npz exportes (shapes, valeurs)
+4. Ouvrir ANIMA_MECHANICUS_GAMMA.ipynb
+5. Forger les .fbx
+6. Importer dans Roblox Studio — valider que l'animation joue correctement
 
 ---
 
@@ -44,8 +42,6 @@ Phase 5 — Validation imperiale :
   → Procedure documentee dans ANIMA_MECHANICUS_ALPHA.ipynb Cellule 1
 - WHAM necessite ffmpeg + torch + detectron2 + mmcv sur Colab T4
   → Cellule d'installation complete dans ANIMA_MECHANICUS_ALPHA.ipynb
-- Template r15_template.blend non encore pousse dans le repo
-  → Necessaire pour que U-GAMMA fonctionne
 
 ---
 
@@ -55,10 +51,10 @@ Phase 5 — Validation imperiale :
 |----------|---------|
 | Camera agitee → root motion fausse | Warning Gemini `camera.mouvement = agitee` + option desactivation root_position |
 | Corps partiel → hallucination WHAM | Filtre Gemini `qualite_estimee < 0.6` → segment exclu automatiquement |
-| Occlusions courtes (<10 frames) | Interpolation lineaire scipy interp1d (integre dans motus_extract.py) |
-| SMPL 24 joints → R15 15 os | Mapping fixe defini dans le convertisseur |
-| Blender headless lent | Template R15 pre-charge en .blend (inchange U-GAMMA) |
-| Zoom video → root motion fausse | Warning Gemini `camera.zoom_detecte = true` |
+| Occlusions courtes (<10 frames) | Interpolation lineaire scipy interp1d |
+| SMPL 24 joints → R15 15 os | Mapping fixe dans motus_extract.py |
+| r15_template.blend manquant | Rig R15 genere programmatiquement dans motus_forge.py v4 |
+| Blender headless lent | Template supprime → demarrage plus rapide |
 
 ---
 
@@ -68,4 +64,4 @@ Phase 5 — Validation imperiale :
 |---------|-------------|--------|
 | V1 | 3 Fregates + BVH | Abandonne |
 | V2 | 2 Fregates + MediaPipe | Echoue (videos Roblox 3D incompatibles) |
-| V3 | 2 Fregates + Gemini + WHAM | En cours — Phase 5 (Validation) |
+| V3 | 2 Fregates + Gemini + WHAM | Phase 5 — Validation |
