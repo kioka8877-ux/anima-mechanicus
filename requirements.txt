@@ -1,5 +1,19 @@
-mediapipe>=0.10.0
+# ANIMA-MECHANICUS — Dependances Python
+# U-ALPHA (Fregate Auspex Cogitateur)
+# Note : torch, detectron2, mmcv et google-generativeai sont installes
+#        directement dans le notebook Colab (versions specifiques CUDA T4)
+
 numpy>=1.24.0
 scipy>=1.10.0
-scenedetect[opencv]>=0.6.0
 opencv-python-headless>=4.8.0
+scenedetect[opencv]>=0.6.0
+
+# U-GAMMA (Fregate La Forge) — aucune dep Python hors numpy + Blender
+# Blender est telecharge dans le notebook Colab
+
+# Installation manuelle requise dans Colab (voir ANIMA_MECHANICUS_ALPHA.ipynb) :
+#   pip install torch==2.1.0 torchvision==0.16.0 --index-url .../cu118
+#   pip install google-generativeai
+#   mim install mmcv==2.0.1 mmdet==3.1.0 mmpose==1.1.0
+#   pip install detectron2 (depuis GitHub facebookresearch)
+#   git clone https://github.com/yohanshin/WHAM.git
