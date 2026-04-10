@@ -73,6 +73,92 @@ Vidéo .mp4 (humain réel)
 
 ---
 
+## Contrat JSON Gemini (Sortie de l'Analyse Vidéo)
+
+Gemini analyse la vidéo entière et produit ce JSON avant tout traitement WHAM.
+Seuls les segments avec `qualite_estimee >= 0.6` et `corps_visible = "complet"` sont envoyés à WHAM.
+
+```json
+{
+  "video_duration_seconds": 45.2,
+  "source_fps": 30,
+  "total_persons": 2,
+
+  "persons": [
+    {
+      "person_id": 0,
+      "segments_valides": [
+        {
+          "start_s": 2.5,
+          "end_s": 38.0,
+          "corps_visible": "complet",
+          "orientation": "face",
+          "distance_camera": "proche",
+          "type_mouvement": "danse",
+          "qualite_estimee": 0.9,
+          "problemes": []
+        },
+        {
+          "start_s": 41.0,
+          "end_s": 45.2,
+          "corps_visible": "partiel",
+          "orientation": "profil",
+          "distance_camera": "moyen",
+          "type_mouvement": "marche",
+          "qualite_estimee": 0.6,
+          "problemes": ["jambes_coupees"]
+        }
+      ],
+      "segments_exclus": [
+        {
+          "start_s": 0.0,
+          "end_s": 2.5,
+          "raison": "personne_absente"
+        },
+        {
+          "start_s": 38.0,
+          "end_s": 41.0,
+          "raison": "flou_mouvement"
+        }
+      ]
+    }
+  ],
+
+  "camera": {
+    "mouvement": "stable",
+    "zoom_detecte": false
+  },
+
+  "qualite_globale": "bonne",
+  "recommandation": "Extraire personne 0 sur segment 2.5-38.0s. Corps complet visible, caméra stable."
+}
+```
+
+### Valeurs possibles par champ
+
+| Champ | Valeurs | Impact sur le pipeline |
+|-------|---------|------------------------|
+| `corps_visible` | `complet` / `partiel` / `tete_seulement` | `partiel` = warning ; `tete_seulement` = segment exclu |
+| `orientation` | `face` / `profil` / `dos` / `mixte` | `dos` = warning précision bras réduite |
+| `distance_camera` | `proche` / `moyen` / `lointain` | `lointain` = warning qualité WHAM dégradée |
+| `type_mouvement` | `marche` / `danse` / `combat` / `sport` / `statique` | Info méta uniquement |
+| `qualite_estimee` | `0.0` → `1.0` | Seuil de filtrage automatique : `< 0.6` = exclu |
+| `problemes` | `jambes_coupees` / `flou_mouvement` / `occlusion_partielle` / `contre_jour` | Affiché comme warning |
+| `camera.mouvement` | `stable` / `panoramique` / `suivi` / `agitee` | `agitee` = root motion peu fiable |
+| `camera.zoom_detecte` | `true` / `false` | `true` = root motion faussé, warning |
+
+### Ce que Gemini N'extrait PAS (volontairement)
+
+| Donnée | Raison de l'exclusion |
+|--------|-----------------------|
+| Position exacte caméra / focale | WHAM est monoculaire, non nécessaire |
+| Description du décor | Aucun impact sur la pose |
+| Description des vêtements | Aucun impact |
+| Landmarks 2D manuels | WHAM les calcule mieux lui-même |
+| Audio / parole | Hors scope |
+
+---
+
 ## Contrat .npz (Interface U-ALPHA → U-GAMMA)
 
 ```python
