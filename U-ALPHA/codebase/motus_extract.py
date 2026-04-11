@@ -138,20 +138,29 @@ Règles d'évaluation :
 # MODULE 1 — ANALYSE GEMINI
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Cascade de modeles — du plus puissant au plus permissif.
+# Familles de modeles par ordre de preference — du plus puissant au plus permissif.
 # Limites free tier (approx.) :
-#   gemini-2.5-pro-preview : 5 RPM  |  25 RPD   (quota tres limite)
-#   gemini-2.5-flash       : 10 RPM | 500 RPD
-#   gemini-2.0-flash       : 15 RPM | 1500 RPD
-#   gemini-1.5-flash       : 15 RPM | 1500 RPD
-_GEMINI_CASCADE = [
-    "gemini-2.5-pro-preview",
+#   gemini-2.5-pro   : 5 RPM  |  25 RPD   (quota tres limite)
+#   gemini-2.5-flash : 10 RPM | 500 RPD
+#   gemini-2.0-flash : 15 RPM | 1500 RPD
+#   gemini-1.5-flash : 15 RPM | 1500 RPD
+# NOTE : les noms exacts sont resolus dynamiquement depuis l'API (ListModels)
+#        pour s'adapter aux modeles reellement disponibles sur le compte.
+_GEMINI_FAMILIES = [
+    "gemini-2.5-pro",
     "gemini-2.5-flash",
     "gemini-2.0-flash",
     "gemini-1.5-flash",
+    "gemini-1.5-pro",
 ]
 
-# Suffixes de modeles non-vision a exclure
+# Sous-chaines a exclure lors du matching : modeles non-video ou sous-optimaux
+_AVOID_IN_MODEL = (
+    "-audio", "-native-audio", "-tts", "-embedding",
+    "-aqa", "-lite", "-nano", "-it",
+)
+
+# Suffixes de modeles non-vision a exclure dans ListModels
 _EXCLUDED_SUFFIXES = ("-tts", "-audio", "-embedding", "-aqa", "-it")
 
 # Attente minimale RPM : 65s pour vider la fenetre d'une minute
@@ -162,17 +171,74 @@ def _list_vision_models(client) -> list:
     """Retourne la liste des modeles Gemini supportant la vision video."""
     try:
         all_models = [m.name.replace("models/", "") for m in client.models.list()]
-        return [m for m in all_models if not any(m.endswith(s) for s in _EXCLUDED_SUFFIXES)]
+        return [
+            m for m in all_models
+            if not any(m.endswith(s) for s in _EXCLUDED_SUFFIXES)
+            and not any(bad in m for bad in ("-native-audio",))
+        ]
     except Exception:
         return []
 
 
 def _resolve_model(candidate: str, available: list) -> str:
-    """Trouve le meilleur modele correspondant au candidat dans la liste disponible."""
-    matches = [m for m in available if m == candidate or m.startswith(candidate + "-")]
-    if matches:
-        return sorted(matches)[-1]
-    return candidate  # tenter le nom exact si non trouve
+    """Trouve le meilleur modele video correspondant au candidat.
+
+    Priorite :
+      1. Correspondance exacte
+      2. Correspondance prefixe en excluant les variants non-video
+         (audio, lite, nano...) — retourne le NOM LE PLUS COURT (plus stable)
+      3. Correspondance prefixe sans restriction — retourne le plus court
+      4. Nom exact tel quel (peut 404, mais derniere chance)
+    """
+    # 1. Exact
+    if candidate in available:
+        return candidate
+
+    prefix = candidate + "-"
+
+    # 2. Prefixe strict : exclure les variants non-video
+    good = [
+        m for m in available
+        if m.startswith(prefix) and not any(bad in m for bad in _AVOID_IN_MODEL)
+    ]
+    if good:
+        return sorted(good, key=len)[0]  # plus court = plus canonical/stable
+
+    # 3. Prefixe sans restriction (fallback)
+    any_match = [m for m in available if m.startswith(prefix)]
+    if any_match:
+        return sorted(any_match, key=len)[0]
+
+    # 4. Aucun match — retourner le nom exact (tentera l'appel API directement)
+    return candidate
+
+
+def _build_cascade_from_available(available: list, start: int = 0) -> list:
+    """Construit la cascade de modeles video depuis la liste reelle des modeles disponibles.
+
+    Parcourt _GEMINI_FAMILIES dans l'ordre de preference et resout chaque famille
+    vers le meilleur modele reel disponible.  Ne retient chaque modele resolu qu'une
+    seule fois (dedoublonnage).
+
+    Args:
+        available : liste brute des modeles (depuis ListModels)
+        start     : index de depart dans _GEMINI_FAMILIES (pour --start-model)
+    """
+    cascade = []
+    seen = set()
+    families = _GEMINI_FAMILIES[start:]
+
+    for family in families:
+        resolved = _resolve_model(family, available)
+        if resolved and resolved not in seen:
+            cascade.append(resolved)
+            seen.add(resolved)
+
+    if not cascade:
+        # Dernier recours : utiliser les 4 premiers modeles disponibles
+        cascade = available[:4]
+
+    return cascade
 
 
 def _classify_429(err_str: str) -> str:
@@ -294,6 +360,14 @@ def analyze_video_gemini(
     client = _make_client()
     available = _list_vision_models(client)
 
+    # Construire la cascade dynamiquement depuis les modeles reellement disponibles
+    cascade = _build_cascade_from_available(available, start=start_model)
+    if cascade:
+        print(f"[U-ALPHA][Gemini] Cascade : {' → '.join(cascade)}")
+    else:
+        print("[U-ALPHA][Gemini] WARN : aucun modele vision detecte — tentative sur noms par defaut")
+        cascade = _GEMINI_FAMILIES[start_model:]
+
     # Upload unique de la video (ne compte pas dans le quota RPM)
     print("[U-ALPHA][Gemini] Upload video en cours...")
     video_file = client.files.upload(
@@ -315,15 +389,9 @@ def analyze_video_gemini(
         sys.exit(1)
 
     last_error = None
-    cascade = _GEMINI_CASCADE[start_model:]
 
-    if start_model > 0:
-        print(f"[U-ALPHA][Gemini] Cascade demarre au modele {start_model} : {cascade[0]}")
-
-    for cascade_idx, model_candidate in enumerate(cascade):
-        model_id = _resolve_model(model_candidate, available)
-        real_idx = start_model + cascade_idx
-        print(f"[U-ALPHA][Gemini] Modele {real_idx+1}/{len(_GEMINI_CASCADE)} : {model_id}")
+    for cascade_idx, model_id in enumerate(cascade):
+        print(f"[U-ALPHA][Gemini] Modele {cascade_idx+1}/{len(cascade)} : {model_id}")
 
         for attempt in range(max_retries_per_model):
             try:
@@ -433,7 +501,7 @@ def analyze_video_gemini(
         pass
 
     print(f"[U-ALPHA][Gemini] ECHEC — tous les modeles de la cascade ont ete epuises.")
-    print(f"  Modeles essayes : {', '.join(cascade)}")
+    print(f"  Modeles essayes ({len(cascade)}) : {', '.join(cascade)}")
     if key_count == 1:
         print(f"  Conseil : fournir plusieurs cles avec --gemini-keys cle1,cle2")
         print(f"            pour la rotation automatique sur quota epuise.")
@@ -850,3 +918,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
