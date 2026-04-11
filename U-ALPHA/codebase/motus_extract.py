@@ -230,10 +230,11 @@ GEMINI_RESPONSE_SCHEMA = {
 # NOTE : les noms exacts sont resolus dynamiquement depuis ListModels
 #        pour s'adapter aux modeles reellement disponibles sur le compte.
 _GEMINI_FAMILIES = [
-    "gemini-2.5-flash-lite",   # DEPART — 15 RPM / 1000 RPD free | 4000 RPM / 14000 RPD Tier 1
-    "gemini-2.5-flash",        # Fallback 1 — 10 RPM / 500 RPD free | 2000 RPM Tier 1
-    "gemini-2.5-pro",          # Fallback 2 — 5 RPM / 25 RPD free | 1000 RPM Tier 1
-    "gemini-1.5-pro",          # Fallback legacy
+    "gemini-2.5-flash-lite-preview",  # DEPART 2.5 lite (alias stable)
+    "gemini-2.5-flash",               # Fallback 2.5 flash
+    "gemini-2.0-flash-lite",          # Confirme disponible (alias gemini-2.0-flash-lite-001)
+    "gemini-2.0-flash",               # 2.0 flash stable
+    "gemini-1.5-pro",                 # Fallback legacy
 ]
 
 # Sous-chaines a exclure lors du matching : modeles non-video ou sous-optimaux
@@ -584,6 +585,10 @@ def analyze_video_gemini(
                                 break
 
                 else:
+                    # 404 = modele inexistant ou depreque → skip immediat
+                    if "404" in err_str or "NOT_FOUND" in err_str:
+                        print(f"[U-ALPHA][Gemini] 404 sur {model_id} → modele suivant")
+                        break
                     wait = (attempt + 1) * 3
                     print(f"[U-ALPHA][Gemini] Erreur tentative {attempt+1} "
                           f"({err_str[:120]}) — attente {wait}s")
