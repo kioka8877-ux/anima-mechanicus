@@ -249,6 +249,9 @@ _EXCLUDED_SUFFIXES = ("-tts", "-audio", "-embedding", "-aqa", "-it")
 # Attente minimale RPM : 65s pour vider la fenetre d'une minute
 _RPM_WAIT_BASE = 65
 
+# Videos sous ce seuil → mode inline : 1 seule requete (pas d'upload ni de polling)
+_MAX_INLINE_MB = 15
+
 
 def _list_vision_models(client) -> list:
     """Retourne la liste des modeles Gemini supportant la vision video."""
@@ -382,20 +385,26 @@ def analyze_video_gemini(
     """
     Envoie la video a Gemini et retourne le JSON d'analyse.
 
+    Consommation de requetes selon la taille de la video :
+      - Cache hit         : 0 requete
+      - Inline (< 15 MB) : 1 requete  (generate_content uniquement)
+      - File API (>= 15M): 3 requetes (upload + generate + delete)
+        + polling si le traitement video prend > 5s (rare)
+
     Strategies anti-429 :
-      1. Cascade automatique : pro → 2.5-flash → 2.0-flash → 1.5-flash
-      2. Classification RPM vs RPD :
-           - RPD (quota journalier) → skip immediat vers modele suivant, pas d'attente
-           - RPM (limite/minute)   → attente 65s+ pour vider la fenetre, puis retry
-      3. Rotation multi-cles : si plusieurs cles fournies, bascule a chaque 429
-      4. Cache JSON : si cache_dir fourni, sauvegarde le resultat et le recharge
-                      a la prochaine execution sur la meme video
+      1. Cache JSON : 0 requete si la meme video a deja ete analysee
+      2. Mode inline : 1 requete au lieu de 7-10 pour les petites videos
+      3. Cascade flash-lite → flash → pro : part du modele le plus permissif
+      4. Classification RPM vs RPD :
+           - RPD → skip immediat vers modele suivant
+           - RPM → attente 65s+ ou rotation de cle
+      5. Rotation multi-cles : bascule sur la cle suivante a chaque 429
 
     Args:
         video_path  : chemin de la video .mp4
         api_keys    : str (cle unique ou virgule-separees) ou list[str]
-        start_model : index de depart dans _GEMINI_CASCADE (0 = pro)
-        cache_dir   : dossier de cache (vide = desactive)
+        start_model : index de depart dans _GEMINI_FAMILIES (0 = flash-lite)
+        cache_dir   : dossier de cache JSON (vide = desactive)
     """
     try:
         from google import genai
@@ -417,9 +426,9 @@ def analyze_video_gemini(
 
     key_count = len(keys)
     if key_count > 1:
-        print(f"[U-ALPHA][Gemini] {key_count} cles API disponibles — rotation automatique activee")
+        print(f"[U-ALPHA][Gemini] {key_count} cles API — rotation automatique activee")
 
-    # Cache : verifier si un resultat existe deja pour cette video
+    # ── Cache : 0 requete si la meme video a deja ete analysee ───────────────
     if cache_dir:
         os.makedirs(cache_dir, exist_ok=True)
         cache_file = _gemini_cache_path(video_path, cache_dir)
@@ -427,8 +436,8 @@ def analyze_video_gemini(
             try:
                 with open(cache_file, "r", encoding="utf-8") as f:
                     cached = json.load(f)
-                print(f"[U-ALPHA][Gemini] Cache trouve — analyse chargee depuis {cache_file}")
-                print("  (Supprimer le fichier .json pour forcer une re-analyse)")
+                print(f"[U-ALPHA][Gemini] Cache hit — 0 requete consommee")
+                print(f"  (Supprimer {cache_file} pour forcer une re-analyse)")
                 return cached
             except Exception as e:
                 print(f"[U-ALPHA][Gemini] Cache illisible ({e}) — re-analyse en cours")
@@ -441,37 +450,59 @@ def analyze_video_gemini(
         return genai.Client(api_key=keys[key_idx % key_count])
 
     client = _make_client()
-    available = _list_vision_models(client)
 
-    # Construire la cascade dynamiquement depuis les modeles reellement disponibles
-    cascade = _build_cascade_from_available(available, start=start_model)
-    if cascade:
-        print(f"[U-ALPHA][Gemini] Cascade : {' → '.join(cascade)}")
+    # ── Cascade : noms directs, sans appel ListModels (economise 1 requete) ──
+    cascade = _GEMINI_FAMILIES[start_model:]
+    print(f"[U-ALPHA][Gemini] Cascade : {' → '.join(cascade)}")
+
+    # ── Strategie selon taille : inline (1 req) ou File API (3 req) ──────────
+    size_mb = os.path.getsize(video_path) / 1024 / 1024
+    use_inline = size_mb <= _MAX_INLINE_MB
+
+    if use_inline:
+        print(f"[U-ALPHA][Gemini] {size_mb:.1f} MB → mode inline (1 seule requete)")
+        with open(video_path, "rb") as f:
+            video_bytes = f.read()
+        video_ref = genai_types.Part.from_bytes(data=video_bytes, mime_type="video/mp4")
+
+        def _cleanup():
+            pass  # rien a nettoyer en mode inline
+
     else:
-        print("[U-ALPHA][Gemini] WARN : aucun modele vision detecte — tentative sur noms par defaut")
-        cascade = _GEMINI_FAMILIES[start_model:]
+        print(f"[U-ALPHA][Gemini] {size_mb:.1f} MB → mode File API (upload + generate + delete)")
+        print("[U-ALPHA][Gemini] Upload en cours...")
+        video_file = client.files.upload(
+            file=video_path,
+            config=genai_types.UploadFileConfig(mime_type="video/mp4")
+        )
+        poll = 0
+        while video_file.state.name == "PROCESSING":
+            time.sleep(5)
+            poll += 1
+            if poll % 6 == 0:
+                print(f"[U-ALPHA][Gemini] Traitement Google ({poll*5}s)...")
+            video_file = client.files.get(name=video_file.name)
 
-    # Upload unique de la video (ne compte pas dans le quota RPM)
-    print("[U-ALPHA][Gemini] Upload video en cours...")
-    video_file = client.files.upload(
-        file=video_path,
-        config=genai_types.UploadFileConfig(mime_type="video/mp4")
-    )
+        if video_file.state.name == "FAILED":
+            print("[U-ALPHA][Gemini] ERREUR : echec traitement video Google.")
+            sys.exit(1)
 
-    print("[U-ALPHA][Gemini] Attente traitement video sur les serveurs Google...")
-    poll = 0
-    while video_file.state.name == "PROCESSING":
-        time.sleep(5)
-        poll += 1
-        if poll % 6 == 0:
-            print(f"[U-ALPHA][Gemini] Toujours en traitement ({poll*5}s)...")
-        video_file = client.files.get(name=video_file.name)
+        video_ref = video_file
 
-    if video_file.state.name == "FAILED":
-        print("[U-ALPHA][Gemini] ERREUR : echec du traitement video par Google.")
-        sys.exit(1)
+        def _cleanup():
+            try:
+                client.files.delete(name=video_file.name)
+            except Exception:
+                pass
 
+    # ── Boucle cascade + retries ─────────────────────────────────────────────
     last_error = None
+    gen_cfg = genai_types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_schema=GEMINI_RESPONSE_SCHEMA,
+        temperature=0.2,
+        max_output_tokens=8192,
+    )
 
     for cascade_idx, model_id in enumerate(cascade):
         print(f"[U-ALPHA][Gemini] Modele {cascade_idx+1}/{len(cascade)} : {model_id}")
@@ -480,13 +511,8 @@ def analyze_video_gemini(
             try:
                 response = client.models.generate_content(
                     model=model_id,
-                    contents=[video_file, GEMINI_PROMPT],
-                    config=genai_types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=GEMINI_RESPONSE_SCHEMA,
-                        temperature=0.2,
-                        max_output_tokens=8192,
-                    )
+                    contents=[video_ref, GEMINI_PROMPT],
+                    config=gen_cfg,
                 )
 
                 raw = response.text.strip() if response.text else ""
@@ -498,20 +524,17 @@ def analyze_video_gemini(
 
                 result = json.loads(raw)
 
-                # Sauvegarder dans le cache si active
                 if cache_file:
                     try:
                         with open(cache_file, "w", encoding="utf-8") as f:
                             json.dump(result, f, ensure_ascii=False, indent=2)
-                        print(f"[U-ALPHA][Gemini] Resultat cache dans {cache_file}")
+                        print(f"[U-ALPHA][Gemini] Cache ecrit : {cache_file}")
                     except Exception as e:
-                        print(f"[U-ALPHA][Gemini] Avertissement : impossible d'ecrire le cache ({e})")
+                        print(f"[U-ALPHA][Gemini] Avertissement cache ({e})")
 
-                try:
-                    client.files.delete(name=video_file.name)
-                except Exception:
-                    pass
-                print(f"[U-ALPHA][Gemini] Analyse reussie avec {model_id}")
+                _cleanup()
+                mode_str = "inline" if use_inline else "File API"
+                print(f"[U-ALPHA][Gemini] Succes — {model_id} ({mode_str})")
                 return result
 
             except json.JSONDecodeError as e:
@@ -535,35 +558,24 @@ def analyze_video_gemini(
                     quota_type = _classify_429(err_str)
 
                     if quota_type == "rpd":
-                        # ── Quota journalier épuisé ──────────────────────────────
-                        # Attendre est inutile (le quota se recharge a minuit Pacific).
-                        # Si plusieurs cles disponibles, essayer la suivante d'abord.
                         if key_count > 1 and (key_idx + 1) % key_count != 0:
                             key_idx += 1
                             client = _make_client()
-                            print(f"[U-ALPHA][Gemini] RPD sur cle {key_idx} — rotation vers cle {(key_idx % key_count)+1}/{key_count}")
-                            # Rester sur le meme modele avec la nouvelle cle
-                            break  # sortir du loop attempt, mais cascade_idx reste
+                            print(f"[U-ALPHA][Gemini] RPD — rotation vers cle {(key_idx % key_count)+1}/{key_count}")
+                            break
                         else:
-                            print(f"[U-ALPHA][Gemini] Quota journalier epuise sur {model_id} "
-                                  f"(toutes les cles) → modele suivant sans attente")
-                            break  # passer au prochain modele
+                            print(f"[U-ALPHA][Gemini] RPD epuise sur {model_id} → modele suivant")
+                            break
 
                     else:
-                        # ── Limite RPM ───────────────────────────────────────────
-                        # Attendre au moins 65s pour vider la fenetre d'une minute.
-                        # Si plusieurs cles disponibles, alterner plutot qu'attendre.
                         if key_count > 1:
                             key_idx += 1
                             client = _make_client()
-                            print(f"[U-ALPHA][Gemini] RPM sur cle {key_idx} — rotation vers "
-                                  f"cle {(key_idx % key_count)+1}/{key_count} (pas d'attente)")
-                            # Continuer le loop attempt avec la nouvelle cle
+                            print(f"[U-ALPHA][Gemini] RPM — rotation vers cle {(key_idx % key_count)+1}/{key_count}")
                         else:
-                            # Cle unique : attendre que la fenetre RPM se vide
                             wait = min(_RPM_WAIT_BASE + attempt * 15, 120)
                             if attempt < max_retries_per_model - 1:
-                                print(f"[U-ALPHA][Gemini] RPM sur {model_id} — attente {wait}s "
+                                print(f"[U-ALPHA][Gemini] RPM — attente {wait}s "
                                       f"(tentative {attempt+1}/{max_retries_per_model})")
                                 time.sleep(wait)
                             else:
@@ -572,29 +584,20 @@ def analyze_video_gemini(
                                 break
 
                 else:
-                    # Erreur non-quota : attente courte + retry
                     wait = (attempt + 1) * 3
                     print(f"[U-ALPHA][Gemini] Erreur tentative {attempt+1} "
                           f"({err_str[:120]}) — attente {wait}s")
                     if attempt < max_retries_per_model - 1:
                         time.sleep(wait)
 
-    try:
-        client.files.delete(name=video_file.name)
-    except Exception:
-        pass
+    _cleanup()
 
-    print(f"[U-ALPHA][Gemini] ECHEC — tous les modeles de la cascade ont ete epuises.")
-    print(f"  Modeles essayes ({len(cascade)}) : {', '.join(cascade)}")
+    print(f"[U-ALPHA][Gemini] ECHEC — tous les modeles epuises.")
+    print(f"  Modeles essayes : {', '.join(cascade)}")
     if key_count == 1:
-        print(f"  Conseil multi-cles : --gemini-keys cle1,cle2  (rotation auto sur 429)")
-    print(f"  Verifier ton quota sur : https://aistudio.google.com/rate-limit")
-    print(f"")
-    print(f"  ── Solution definitive : passer au Tier 1 (gratuit, 200x plus de quota) ──")
-    print(f"  1. Lier un compte de facturation : https://console.cloud.google.com/billing")
-    print(f"     (carte prepayee Revolut/N26/Wise OK — 0€ preleve tant que tu restes dans les quotas)")
-    print(f"  2. Free tier : 15 RPM / 1000 RPD → Tier 1 : 4000 RPM / 14000 RPD")
-    print(f"  3. Configurer alerte budget $0 sur https://console.cloud.google.com/billing/budgets")
+        print(f"  Conseil : --gemini-keys cle1,cle2 (rotation auto sur 429)")
+    print(f"  Quota : https://aistudio.google.com/rate-limit")
+    print(f"  ── Tier 1 gratuit (200x quota) : https://console.cloud.google.com/billing ──")
     print(f"  Derniere erreur : {last_error}")
     sys.exit(1)
 
