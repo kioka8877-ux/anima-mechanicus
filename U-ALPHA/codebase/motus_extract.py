@@ -133,44 +133,42 @@ Règles d'évaluation :
 # MODULE 1 — ANALYSE GEMINI
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _pick_best_gemini_model(client) -> str:
-    """
-    Detecte automatiquement le meilleur modele Gemini disponible.
-    Priorite : pro > flash, version la plus recente en premier.
-    Exclut les modeles non-vision (TTS, audio, embedding).
-    """
-    PRIORITY = [
-        "gemini-2.5-pro",
-        "gemini-2.5-pro-preview",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-preview",
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-pro",
-        "gemini-2.0-pro-exp",
-        "gemini-2.0-flash-exp",
-        "gemini-2.0-flash",
-        "gemini-1.5-pro",
-        "gemini-1.5-flash",
-    ]
-    # Modeles non-vision a exclure (TTS, audio, embedding, etc.)
-    EXCLUDED_SUFFIXES = ("-tts", "-audio", "-embedding", "-aqa", "-it")
+# Cascade de modeles : pro d'abord, fallback vers flash si quota depasse
+# Limites free tier approx. : pro=5RPM/25RPD | flash=10-15RPM/500-1500RPD
+_GEMINI_CASCADE = [
+    "gemini-2.5-pro-preview",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+]
+
+# Suffixes de modeles non-vision a exclure
+_EXCLUDED_SUFFIXES = ("-tts", "-audio", "-embedding", "-aqa", "-it")
+
+
+def _list_vision_models(client) -> list:
+    """Retourne la liste des modeles Gemini supportant la vision video."""
     try:
         all_models = [m.name.replace("models/", "") for m in client.models.list()]
-        # Filtrer les modeles qui ne supportent pas la vision video
-        available = [m for m in all_models if not any(m.endswith(s) for s in EXCLUDED_SUFFIXES)]
-        for candidate in PRIORITY:
-            matches = [m for m in available if m == candidate or m.startswith(candidate + "-")]
-            if matches:
-                chosen = sorted(matches)[-1]
-                print(f"[U-ALPHA][Gemini] Modele selectionne : {chosen}")
-                return chosen
-    except Exception as e:
-        print(f"[U-ALPHA][Gemini] Impossible de lister les modeles ({e}) — fallback gemini-1.5-pro")
-    return "gemini-1.5-pro"
+        return [m for m in all_models if not any(m.endswith(s) for s in _EXCLUDED_SUFFIXES)]
+    except Exception:
+        return []
 
 
-def analyze_video_gemini(video_path: str, api_key: str, max_retries: int = 5) -> dict:
-    """Envoie la video a Gemini (meilleur modele disponible) et retourne le JSON d'analyse."""
+def _resolve_model(candidate: str, available: list) -> str:
+    """Trouve le meilleur modele correspondant au candidat dans la liste disponible."""
+    matches = [m for m in available if m == candidate or m.startswith(candidate + "-")]
+    if matches:
+        return sorted(matches)[-1]
+    return candidate  # tenter le nom exact si non trouve
+
+
+def analyze_video_gemini(video_path: str, api_key: str, max_retries_per_model: int = 3) -> dict:
+    """
+    Envoie la video a Gemini et retourne le JSON d'analyse.
+    Cascade automatique : si un modele retourne 429, bascule sur le suivant.
+    Ordre : gemini-2.5-pro-preview -> 2.5-flash -> 2.0-flash -> 1.5-flash
+    """
     try:
         from google import genai
         from google.genai import types as genai_types
@@ -180,67 +178,106 @@ def analyze_video_gemini(video_path: str, api_key: str, max_retries: int = 5) ->
         sys.exit(1)
 
     client = genai.Client(api_key=api_key)
-    model_id = _pick_best_gemini_model(client)
+    available = _list_vision_models(client)
 
+    # Upload unique de la video (ne compte pas dans le quota RPM)
     print("[U-ALPHA][Gemini] Upload video en cours...")
     video_file = client.files.upload(
         file=video_path,
         config=genai_types.UploadFileConfig(mime_type="video/mp4")
     )
 
+    print("[U-ALPHA][Gemini] Attente traitement video sur les serveurs Google...")
+    poll = 0
     while video_file.state.name == "PROCESSING":
-        print("[U-ALPHA][Gemini] Traitement video sur les serveurs Google...")
-        time.sleep(3)
+        time.sleep(5)
+        poll += 1
+        if poll % 6 == 0:
+            print(f"[U-ALPHA][Gemini] Toujours en traitement ({poll*5}s)...")
         video_file = client.files.get(name=video_file.name)
 
     if video_file.state.name == "FAILED":
         print("[U-ALPHA][Gemini] ERREUR : echec du traitement video par Google.")
         sys.exit(1)
 
-    print(f"[U-ALPHA][Gemini] Analyse en cours avec {model_id}...")
+    last_error = None
 
-    for attempt in range(max_retries):
-        try:
-            response = client.models.generate_content(
-                model=model_id,
-                contents=[video_file, GEMINI_PROMPT],
-                config=genai_types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.2,
-                    max_output_tokens=8192,
+    for cascade_idx, model_candidate in enumerate(_GEMINI_CASCADE):
+        model_id = _resolve_model(model_candidate, available)
+        print(f"[U-ALPHA][Gemini] Essai modele {cascade_idx+1}/{len(_GEMINI_CASCADE)} : {model_id}")
+
+        for attempt in range(max_retries_per_model):
+            try:
+                response = client.models.generate_content(
+                    model=model_id,
+                    contents=[video_file, GEMINI_PROMPT],
+                    config=genai_types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.2,
+                        max_output_tokens=8192,
+                    )
                 )
-            )
 
-            raw = response.text.strip() if response.text else ""
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            raw = raw.strip()
+                raw = response.text.strip() if response.text else ""
+                if raw.startswith("```"):
+                    raw = raw.split("```")[1]
+                    if raw.startswith("json"):
+                        raw = raw[4:]
+                raw = raw.strip()
 
-            result = json.loads(raw)
-            client.files.delete(name=video_file.name)
-            return result
+                result = json.loads(raw)
+                try:
+                    client.files.delete(name=video_file.name)
+                except Exception:
+                    pass
+                print(f"[U-ALPHA][Gemini] Analyse reussie avec {model_id}")
+                return result
 
-        except json.JSONDecodeError as e:
-            print(f"[U-ALPHA][Gemini] ERREUR parsing JSON (tentative {attempt+1}) : {e}")
-            print(f"  Reponse brute : {raw[:300]}")
-            if attempt < max_retries - 1:
-                time.sleep(5)
+            except json.JSONDecodeError as e:
+                print(f"[U-ALPHA][Gemini] Erreur JSON (tentative {attempt+1}) : {e}")
+                print(f"  Reponse brute : {raw[:300]}")
+                if attempt < max_retries_per_model - 1:
+                    time.sleep(5)
+                last_error = e
 
-        except Exception as e:
-            err_str = str(e)
-            is_rate_limit = "429" in err_str or "resource_exhausted" in err_str.lower() or "rate" in err_str.lower()
-            if is_rate_limit:
-                wait = 65
-                print(f"[U-ALPHA][Gemini] Rate limit 429 — attente {wait}s puis retry ({attempt+1}/{max_retries})")
-            else:
-                wait = (attempt + 1) * 5
-                print(f"[U-ALPHA][Gemini] Erreur tentative {attempt+1} : {err_str[:200]}")
-            if attempt < max_retries - 1:
-                time.sleep(wait)
+            except Exception as e:
+                err_str = str(e)
+                last_error = e
+                is_rate_limit = (
+                    "429" in err_str
+                    or "resource_exhausted" in err_str.lower()
+                    or "rate_limit" in err_str.lower()
+                    or "quota" in err_str.lower()
+                )
 
-    print(f"[U-ALPHA][Gemini] ECHEC apres {max_retries} tentatives.")
+                if is_rate_limit:
+                    # Backoff exponentiel avec jitter
+                    wait = min(2 ** attempt + (attempt * 2), 60)
+                    if attempt < max_retries_per_model - 1:
+                        print(f"[U-ALPHA][Gemini] 429 sur {model_id} — attente {wait}s "
+                              f"(tentative {attempt+1}/{max_retries_per_model})")
+                        time.sleep(wait)
+                    else:
+                        print(f"[U-ALPHA][Gemini] Quota epuise sur {model_id} "
+                              f"— passage au modele suivant")
+                        break  # passer au prochain modele dans la cascade
+                else:
+                    # Erreur non-quota : attente courte + retry
+                    wait = (attempt + 1) * 3
+                    print(f"[U-ALPHA][Gemini] Erreur tentative {attempt+1} "
+                          f"({err_str[:120]}) — attente {wait}s")
+                    if attempt < max_retries_per_model - 1:
+                        time.sleep(wait)
+
+    try:
+        client.files.delete(name=video_file.name)
+    except Exception:
+        pass
+
+    print(f"[U-ALPHA][Gemini] ECHEC — tous les modeles de la cascade ont ete epuises.")
+    print(f"  Modeles essayes : {', '.join(_GEMINI_CASCADE)}")
+    print(f"  Verifier ton quota sur : https://aistudio.google.com/rate-limit")
+    print(f"  Derniere erreur : {last_error}")
     sys.exit(1)
 
 
