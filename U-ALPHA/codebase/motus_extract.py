@@ -137,6 +137,7 @@ def _pick_best_gemini_model(client) -> str:
     """
     Detecte automatiquement le meilleur modele Gemini disponible.
     Priorite : pro > flash, version la plus recente en premier.
+    Exclut les modeles non-vision (TTS, audio, embedding).
     """
     PRIORITY = [
         "gemini-2.5-pro",
@@ -151,8 +152,12 @@ def _pick_best_gemini_model(client) -> str:
         "gemini-1.5-pro",
         "gemini-1.5-flash",
     ]
+    # Modeles non-vision a exclure (TTS, audio, embedding, etc.)
+    EXCLUDED_SUFFIXES = ("-tts", "-audio", "-embedding", "-aqa", "-it")
     try:
-        available = [m.name.replace("models/", "") for m in client.models.list()]
+        all_models = [m.name.replace("models/", "") for m in client.models.list()]
+        # Filtrer les modeles qui ne supportent pas la vision video
+        available = [m for m in all_models if not any(m.endswith(s) for s in EXCLUDED_SUFFIXES)]
         for candidate in PRIORITY:
             matches = [m for m in available if m == candidate or m.startswith(candidate + "-")]
             if matches:
