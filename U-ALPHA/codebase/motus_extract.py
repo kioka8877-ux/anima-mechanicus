@@ -134,24 +134,106 @@ Règles d'évaluation :
 """
 
 
+# Schema JSON attendu de Gemini (technique response_schema = JSON garanti valide,
+# sans markdown, sans hallucination de structure — inspire de EXO_00_CORTEX)
+GEMINI_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "video_duration_seconds": {"type": "NUMBER"},
+        "source_fps":             {"type": "INTEGER"},
+        "total_persons":          {"type": "INTEGER"},
+        "persons": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "person_id": {"type": "INTEGER"},
+                    "segments_valides": {
+                        "type": "ARRAY",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "start_s":         {"type": "NUMBER"},
+                                "end_s":           {"type": "NUMBER"},
+                                "corps_visible":   {"type": "STRING",
+                                                   "enum": ["complet", "partiel", "tete_seulement"]},
+                                "orientation":     {"type": "STRING",
+                                                   "enum": ["face", "profil", "dos", "mixte"]},
+                                "distance_camera": {"type": "STRING",
+                                                   "enum": ["proche", "moyen", "lointain"]},
+                                "type_mouvement":  {"type": "STRING",
+                                                   "enum": ["marche", "danse", "combat", "sport", "statique"]},
+                                "qualite_estimee": {"type": "NUMBER"},
+                                "problemes":       {"type": "ARRAY",
+                                                   "items": {"type": "STRING"}},
+                            },
+                            "required": ["start_s", "end_s", "corps_visible", "orientation",
+                                         "distance_camera", "type_mouvement", "qualite_estimee",
+                                         "problemes"],
+                        }
+                    },
+                    "segments_exclus": {
+                        "type": "ARRAY",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "start_s": {"type": "NUMBER"},
+                                "end_s":   {"type": "NUMBER"},
+                                "raison":  {"type": "STRING",
+                                           "enum": ["personne_absente", "flou_mouvement",
+                                                    "occlusion_totale", "contre_jour"]},
+                            },
+                            "required": ["start_s", "end_s", "raison"],
+                        }
+                    },
+                },
+                "required": ["person_id", "segments_valides", "segments_exclus"],
+            }
+        },
+        "camera": {
+            "type": "OBJECT",
+            "properties": {
+                "mouvement":     {"type": "STRING",
+                                 "enum": ["stable", "panoramique", "suivi", "agitee"]},
+                "zoom_detecte":  {"type": "BOOLEAN"},
+            },
+            "required": ["mouvement", "zoom_detecte"],
+        },
+        "qualite_globale":  {"type": "STRING",
+                            "enum": ["excellente", "bonne", "moyenne", "mauvaise"]},
+        "recommandation":   {"type": "STRING"},
+    },
+    "required": ["video_duration_seconds", "source_fps", "total_persons",
+                 "persons", "camera", "qualite_globale", "recommandation"],
+}
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # MODULE 1 — ANALYSE GEMINI
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Familles de modeles par ordre de preference — du plus puissant au plus permissif.
-# Limites free tier (approx.) :
-#   gemini-2.5-pro   : 5 RPM  |  25 RPD   (quota tres limite)
-#   gemini-2.5-flash : 10 RPM | 500 RPD
-#   gemini-2.0-flash : 15 RPM | 1500 RPD
-#   gemini-1.5-flash : 15 RPM | 1500 RPD
-# NOTE : les noms exacts sont resolus dynamiquement depuis l'API (ListModels)
+# Modeles actifs en 2026 (gemini-2.0-flash et gemini-1.5-flash sont DEPRECIES/retires) :
+#
+#   Famille              | Free tier          | Tier 1 (billing lie, toujours gratuit)
+#   ─────────────────────┼────────────────────┼────────────────────────────────────────
+#   gemini-2.5-pro       | 5 RPM  / 25 RPD   | 1 000 RPM / ~10 000 RPD
+#   gemini-2.5-flash     | 10 RPM / 500 RPD  | 2 000 RPM / 10 000 RPD
+#   gemini-2.5-flash-lite| 15 RPM / 1 000 RPD| 4 000 RPM / 14 000 RPD  ← RECOMMANDE
+#   gemini-1.5-pro       | 2 RPM  / 50 RPD   | fallback legacy
+#
+# Pour passer au Tier 1 (gratuit, 200x plus de quota) :
+#   1. Creer une cle sur https://aistudio.google.com/apikey
+#   2. Lier un compte de facturation : https://console.cloud.google.com/billing
+#   3. La carte (meme prepayee Revolut/N26) sert uniquement de verification — 0€ preleve
+#
+# NOTE : les noms exacts sont resolus dynamiquement depuis ListModels
 #        pour s'adapter aux modeles reellement disponibles sur le compte.
 _GEMINI_FAMILIES = [
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
+    "gemini-2.5-pro",          # Qualite maximale — quota tres limite en free tier
+    "gemini-2.5-flash",        # Bon equilibre qualite/quota
+    "gemini-2.5-flash-lite",   # Modele recommande (15 RPM free / 4000 RPM Tier 1)
+    "gemini-1.5-pro",          # Fallback legacy
 ]
 
 # Sous-chaines a exclure lors du matching : modeles non-video ou sous-optimaux
@@ -400,6 +482,7 @@ def analyze_video_gemini(
                     contents=[video_file, GEMINI_PROMPT],
                     config=genai_types.GenerateContentConfig(
                         response_mime_type="application/json",
+                        response_schema=GEMINI_RESPONSE_SCHEMA,
                         temperature=0.2,
                         max_output_tokens=8192,
                     )
@@ -503,9 +586,14 @@ def analyze_video_gemini(
     print(f"[U-ALPHA][Gemini] ECHEC — tous les modeles de la cascade ont ete epuises.")
     print(f"  Modeles essayes ({len(cascade)}) : {', '.join(cascade)}")
     if key_count == 1:
-        print(f"  Conseil : fournir plusieurs cles avec --gemini-keys cle1,cle2")
-        print(f"            pour la rotation automatique sur quota epuise.")
+        print(f"  Conseil multi-cles : --gemini-keys cle1,cle2  (rotation auto sur 429)")
     print(f"  Verifier ton quota sur : https://aistudio.google.com/rate-limit")
+    print(f"")
+    print(f"  ── Solution definitive : passer au Tier 1 (gratuit, 200x plus de quota) ──")
+    print(f"  1. Lier un compte de facturation : https://console.cloud.google.com/billing")
+    print(f"     (carte prepayee Revolut/N26/Wise OK — 0€ preleve tant que tu restes dans les quotas)")
+    print(f"  2. Free tier : 15 RPM / 1000 RPD → Tier 1 : 4000 RPM / 14000 RPD")
+    print(f"  3. Configurer alerte budget $0 sur https://console.cloud.google.com/billing/budgets")
     print(f"  Derniere erreur : {last_error}")
     sys.exit(1)
 
@@ -918,4 +1006,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
