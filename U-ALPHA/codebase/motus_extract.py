@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""ANIMA-MECHANICUS — Frégate U-ALPHA : L'Auspex Cogitateur — v2
-Pipeline : Gemini 2.0 Flash (analyse) → WHAM (SMPL) → SMPL→R15 → .npz
+"""ANIMA-MECHANICUS — Frégate U-ALPHA : L'Auspex Cogitateur — v3
+Pipeline : Gemini (analyse + cascade anti-429) → WHAM (SMPL) → SMPL→R15 → .npz
 
 Usage:
-    python motus_extract.py video.mp4 --gemini-key YOUR_KEY [options]
+    python motus_extract.py video.mp4 --gemini-keys CLE1,CLE2 [options]
 
 Options:
+    --gemini-key  CLE                Cle unique (alias de --gemini-keys)
+    --gemini-keys CLE1,CLE2,...      Plusieurs cles separees par virgule (rotation auto sur 429)
     --fps {30,60,120}                FPS cible (défaut: 30)
     --smooth {faible,moyen,brutal}   Niveau lissage (défaut: moyen)
     --no-root-motion                 Désactive la translation globale
     --quality-threshold F            Score Gemini minimum (défaut: 0.6)
     --output DIR                     Dossier de sortie (défaut: outputs/)
     --wham-dir DIR                   Chemin vers le dépôt WHAM (défaut: ~/WHAM)
+    --cache-dir DIR                  Cache résultats Gemini (évite re-analyse, défaut: désactivé)
+    --start-model N                  Démarre la cascade au modèle N (0=pro, 1=2.5flash, 2=2.0flash, 3=1.5flash)
 """
 
 import sys
@@ -22,6 +26,7 @@ import subprocess
 import tempfile
 import pickle
 import time
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -133,8 +138,12 @@ Règles d'évaluation :
 # MODULE 1 — ANALYSE GEMINI
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Cascade de modeles : pro d'abord, fallback vers flash si quota depasse
-# Limites free tier approx. : pro=5RPM/25RPD | flash=10-15RPM/500-1500RPD
+# Cascade de modeles — du plus puissant au plus permissif.
+# Limites free tier (approx.) :
+#   gemini-2.5-pro-preview : 5 RPM  |  25 RPD   (quota tres limite)
+#   gemini-2.5-flash       : 10 RPM | 500 RPD
+#   gemini-2.0-flash       : 15 RPM | 1500 RPD
+#   gemini-1.5-flash       : 15 RPM | 1500 RPD
 _GEMINI_CASCADE = [
     "gemini-2.5-pro-preview",
     "gemini-2.5-flash",
@@ -144,6 +153,9 @@ _GEMINI_CASCADE = [
 
 # Suffixes de modeles non-vision a exclure
 _EXCLUDED_SUFFIXES = ("-tts", "-audio", "-embedding", "-aqa", "-it")
+
+# Attente minimale RPM : 65s pour vider la fenetre d'une minute
+_RPM_WAIT_BASE = 65
 
 
 def _list_vision_models(client) -> list:
@@ -163,11 +175,78 @@ def _resolve_model(candidate: str, available: list) -> str:
     return candidate  # tenter le nom exact si non trouve
 
 
-def analyze_video_gemini(video_path: str, api_key: str, max_retries_per_model: int = 3) -> dict:
+def _classify_429(err_str: str) -> str:
+    """Classifie le type d'erreur 429 pour adapter la strategie de retry.
+
+    Returns :
+        'rpd' — quota journalier epuise → skip immediat vers le modele suivant
+        'rpm' — limite par minute     → attendre 65s+ avant de retenter
+
+    Logique :
+        RPD : "per_day", "daily", "exhausted", "quota_exceeded", "resource_exhausted"
+              sans precision de fenetre temporelle (= quota journalier ou total epuise)
+        RPM : "per_minute", "rpm", mentions explicites de fenetre 1 min
+    """
+    s = err_str.lower()
+
+    # Indices clairs d'epuisement journalier / total
+    rpd_keywords = (
+        "per_day", "per day", "daily", "quota_exceeded",
+        "requests per day", "generativelanguage",
+    )
+    if any(k in s for k in rpd_keywords):
+        return "rpd"
+
+    # resource_exhausted sans mention de "minute" = quota journalier
+    if "resource_exhausted" in s and "minute" not in s:
+        return "rpd"
+
+    # Indices de limite par minute
+    rpm_keywords = ("per_minute", "per minute", "requests per minute", " rpm")
+    if any(k in s for k in rpm_keywords):
+        return "rpm"
+
+    # Par defaut : traiter comme RPM (attente prudente, moins de perte de temps
+    # si c'est en fait un RPD car on cascadera apres les retries)
+    return "rpm"
+
+
+def _gemini_cache_path(video_path: str, cache_dir: str) -> str:
+    """Chemin du fichier de cache JSON Gemini pour une video donnee.
+
+    Le hash est base sur le premier Mo de la video (rapide, suffisamment unique).
+    """
+    with open(video_path, "rb") as f:
+        chunk = f.read(1024 * 1024)
+    h = hashlib.md5(chunk).hexdigest()[:10]
+    stem = Path(video_path).stem
+    return os.path.join(cache_dir, f"gemini_cache_{stem}_{h}.json")
+
+
+def analyze_video_gemini(
+    video_path: str,
+    api_keys,
+    max_retries_per_model: int = 3,
+    start_model: int = 0,
+    cache_dir: str = "",
+) -> dict:
     """
     Envoie la video a Gemini et retourne le JSON d'analyse.
-    Cascade automatique : si un modele retourne 429, bascule sur le suivant.
-    Ordre : gemini-2.5-pro-preview -> 2.5-flash -> 2.0-flash -> 1.5-flash
+
+    Strategies anti-429 :
+      1. Cascade automatique : pro → 2.5-flash → 2.0-flash → 1.5-flash
+      2. Classification RPM vs RPD :
+           - RPD (quota journalier) → skip immediat vers modele suivant, pas d'attente
+           - RPM (limite/minute)   → attente 65s+ pour vider la fenetre, puis retry
+      3. Rotation multi-cles : si plusieurs cles fournies, bascule a chaque 429
+      4. Cache JSON : si cache_dir fourni, sauvegarde le resultat et le recharge
+                      a la prochaine execution sur la meme video
+
+    Args:
+        video_path  : chemin de la video .mp4
+        api_keys    : str (cle unique ou virgule-separees) ou list[str]
+        start_model : index de depart dans _GEMINI_CASCADE (0 = pro)
+        cache_dir   : dossier de cache (vide = desactive)
     """
     try:
         from google import genai
@@ -177,7 +256,42 @@ def analyze_video_gemini(video_path: str, api_key: str, max_retries_per_model: i
         print("  Installer avec : pip install -U google-genai")
         sys.exit(1)
 
-    client = genai.Client(api_key=api_key)
+    # Normaliser api_keys en liste
+    if isinstance(api_keys, str):
+        keys = [k.strip() for k in api_keys.split(",") if k.strip()]
+    else:
+        keys = [k.strip() for k in api_keys if k and k.strip()]
+
+    if not keys:
+        print("[U-ALPHA][Gemini] ERREUR : aucune cle API fournie.")
+        sys.exit(1)
+
+    key_count = len(keys)
+    if key_count > 1:
+        print(f"[U-ALPHA][Gemini] {key_count} cles API disponibles — rotation automatique activee")
+
+    # Cache : verifier si un resultat existe deja pour cette video
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_file = _gemini_cache_path(video_path, cache_dir)
+        if os.path.isfile(cache_file):
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    cached = json.load(f)
+                print(f"[U-ALPHA][Gemini] Cache trouve — analyse chargee depuis {cache_file}")
+                print("  (Supprimer le fichier .json pour forcer une re-analyse)")
+                return cached
+            except Exception as e:
+                print(f"[U-ALPHA][Gemini] Cache illisible ({e}) — re-analyse en cours")
+    else:
+        cache_file = ""
+
+    key_idx = 0
+
+    def _make_client():
+        return genai.Client(api_key=keys[key_idx % key_count])
+
+    client = _make_client()
     available = _list_vision_models(client)
 
     # Upload unique de la video (ne compte pas dans le quota RPM)
@@ -201,10 +315,15 @@ def analyze_video_gemini(video_path: str, api_key: str, max_retries_per_model: i
         sys.exit(1)
 
     last_error = None
+    cascade = _GEMINI_CASCADE[start_model:]
 
-    for cascade_idx, model_candidate in enumerate(_GEMINI_CASCADE):
+    if start_model > 0:
+        print(f"[U-ALPHA][Gemini] Cascade demarre au modele {start_model} : {cascade[0]}")
+
+    for cascade_idx, model_candidate in enumerate(cascade):
         model_id = _resolve_model(model_candidate, available)
-        print(f"[U-ALPHA][Gemini] Essai modele {cascade_idx+1}/{len(_GEMINI_CASCADE)} : {model_id}")
+        real_idx = start_model + cascade_idx
+        print(f"[U-ALPHA][Gemini] Modele {real_idx+1}/{len(_GEMINI_CASCADE)} : {model_id}")
 
         for attempt in range(max_retries_per_model):
             try:
@@ -226,6 +345,16 @@ def analyze_video_gemini(video_path: str, api_key: str, max_retries_per_model: i
                 raw = raw.strip()
 
                 result = json.loads(raw)
+
+                # Sauvegarder dans le cache si active
+                if cache_file:
+                    try:
+                        with open(cache_file, "w", encoding="utf-8") as f:
+                            json.dump(result, f, ensure_ascii=False, indent=2)
+                        print(f"[U-ALPHA][Gemini] Resultat cache dans {cache_file}")
+                    except Exception as e:
+                        print(f"[U-ALPHA][Gemini] Avertissement : impossible d'ecrire le cache ({e})")
+
                 try:
                     client.files.delete(name=video_file.name)
                 except Exception:
@@ -251,16 +380,45 @@ def analyze_video_gemini(video_path: str, api_key: str, max_retries_per_model: i
                 )
 
                 if is_rate_limit:
-                    # Backoff exponentiel avec jitter
-                    wait = min(2 ** attempt + (attempt * 2), 60)
-                    if attempt < max_retries_per_model - 1:
-                        print(f"[U-ALPHA][Gemini] 429 sur {model_id} — attente {wait}s "
-                              f"(tentative {attempt+1}/{max_retries_per_model})")
-                        time.sleep(wait)
+                    quota_type = _classify_429(err_str)
+
+                    if quota_type == "rpd":
+                        # ── Quota journalier épuisé ──────────────────────────────
+                        # Attendre est inutile (le quota se recharge a minuit Pacific).
+                        # Si plusieurs cles disponibles, essayer la suivante d'abord.
+                        if key_count > 1 and (key_idx + 1) % key_count != 0:
+                            key_idx += 1
+                            client = _make_client()
+                            print(f"[U-ALPHA][Gemini] RPD sur cle {key_idx} — rotation vers cle {(key_idx % key_count)+1}/{key_count}")
+                            # Rester sur le meme modele avec la nouvelle cle
+                            break  # sortir du loop attempt, mais cascade_idx reste
+                        else:
+                            print(f"[U-ALPHA][Gemini] Quota journalier epuise sur {model_id} "
+                                  f"(toutes les cles) → modele suivant sans attente")
+                            break  # passer au prochain modele
+
                     else:
-                        print(f"[U-ALPHA][Gemini] Quota epuise sur {model_id} "
-                              f"— passage au modele suivant")
-                        break  # passer au prochain modele dans la cascade
+                        # ── Limite RPM ───────────────────────────────────────────
+                        # Attendre au moins 65s pour vider la fenetre d'une minute.
+                        # Si plusieurs cles disponibles, alterner plutot qu'attendre.
+                        if key_count > 1:
+                            key_idx += 1
+                            client = _make_client()
+                            print(f"[U-ALPHA][Gemini] RPM sur cle {key_idx} — rotation vers "
+                                  f"cle {(key_idx % key_count)+1}/{key_count} (pas d'attente)")
+                            # Continuer le loop attempt avec la nouvelle cle
+                        else:
+                            # Cle unique : attendre que la fenetre RPM se vide
+                            wait = min(_RPM_WAIT_BASE + attempt * 15, 120)
+                            if attempt < max_retries_per_model - 1:
+                                print(f"[U-ALPHA][Gemini] RPM sur {model_id} — attente {wait}s "
+                                      f"(tentative {attempt+1}/{max_retries_per_model})")
+                                time.sleep(wait)
+                            else:
+                                print(f"[U-ALPHA][Gemini] RPM — {max_retries_per_model} tentatives "
+                                      f"epuisees sur {model_id} → modele suivant")
+                                break
+
                 else:
                     # Erreur non-quota : attente courte + retry
                     wait = (attempt + 1) * 3
@@ -275,7 +433,10 @@ def analyze_video_gemini(video_path: str, api_key: str, max_retries_per_model: i
         pass
 
     print(f"[U-ALPHA][Gemini] ECHEC — tous les modeles de la cascade ont ete epuises.")
-    print(f"  Modeles essayes : {', '.join(_GEMINI_CASCADE)}")
+    print(f"  Modeles essayes : {', '.join(cascade)}")
+    if key_count == 1:
+        print(f"  Conseil : fournir plusieurs cles avec --gemini-keys cle1,cle2")
+        print(f"            pour la rotation automatique sur quota epuise.")
     print(f"  Verifier ton quota sur : https://aistudio.google.com/rate-limit")
     print(f"  Derniere erreur : {last_error}")
     sys.exit(1)
@@ -571,8 +732,15 @@ def main():
         description="ANIMA-MECHANICUS — Frégate U-ALPHA : L'Auspex Cogitateur"
     )
     parser.add_argument("input", help="Chemin vidéo .mp4 (humain réel uniquement)")
-    parser.add_argument("--gemini-key", required=True,
-                        help="Clé API Gemini (gratuite sur aistudio.google.com)")
+
+    # Cles Gemini — deux formes acceptées pour la compatibilite
+    key_group = parser.add_mutually_exclusive_group(required=True)
+    key_group.add_argument("--gemini-key",
+                           help="Cle API Gemini unique (alias de --gemini-keys)")
+    key_group.add_argument("--gemini-keys",
+                           help="Cles API Gemini separees par virgule (rotation auto sur 429). "
+                                "Ex: --gemini-keys cle1,cle2,cle3")
+
     parser.add_argument("-o", "--output", default="outputs/")
     parser.add_argument("--fps", type=int, default=30, choices=[30, 60, 120])
     parser.add_argument("--smooth", default="moyen",
@@ -580,6 +748,14 @@ def main():
     parser.add_argument("--no-root-motion", action="store_true")
     parser.add_argument("--quality-threshold", type=float, default=0.6)
     parser.add_argument("--wham-dir", default="~/WHAM")
+    parser.add_argument("--cache-dir", default="",
+                        help="Dossier pour cacher les resultats Gemini (evite re-analyse). "
+                             "Ex: --cache-dir outputs/gemini_cache")
+    parser.add_argument("--start-model", type=int, default=0,
+                        choices=[0, 1, 2, 3],
+                        help="Index de depart dans la cascade Gemini "
+                             "(0=pro, 1=2.5flash, 2=2.0flash, 3=1.5flash). "
+                             "Utile si le pro est connu comme epuise.")
     args = parser.parse_args()
 
     if not os.path.isfile(args.input):
@@ -596,9 +772,17 @@ def main():
     cap.release()
     print(f"[U-ALPHA] Vidéo : {total_frames} frames, {src_fps:.1f} FPS, {duration:.1f}s")
 
+    # Normaliser les cles
+    api_keys = args.gemini_keys if args.gemini_keys else args.gemini_key
+
     # ── Etape 1 : Analyse Gemini ─────────────────────────────────────────────
-    print("\n[U-ALPHA] Etape 1/4 — Analyse Gemini 2.0 Flash...")
-    gemini_data = analyze_video_gemini(args.input, args.gemini_key)
+    print("\n[U-ALPHA] Etape 1/4 — Analyse Gemini...")
+    gemini_data = analyze_video_gemini(
+        args.input,
+        api_keys,
+        start_model=args.start_model,
+        cache_dir=args.cache_dir,
+    )
     print_gemini_report(gemini_data)
 
     segments = filter_segments(gemini_data, args.quality_threshold)
