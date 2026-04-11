@@ -138,12 +138,12 @@ def _pick_best_gemini_model(client) -> str:
     Detecte automatiquement le meilleur modele Gemini disponible.
     Priorite : pro > flash, version la plus recente en premier.
     """
-    # Liste de priorite decroissante — mise a jour automatique via l'API
     PRIORITY = [
         "gemini-2.5-pro",
         "gemini-2.5-pro-preview",
         "gemini-2.5-flash",
         "gemini-2.5-flash-preview",
+        "gemini-2.5-flash-lite",
         "gemini-2.0-pro",
         "gemini-2.0-pro-exp",
         "gemini-2.0-flash-exp",
@@ -154,10 +154,9 @@ def _pick_best_gemini_model(client) -> str:
     try:
         available = [m.name.replace("models/", "") for m in client.models.list()]
         for candidate in PRIORITY:
-            # Cherche une correspondance exacte ou par prefixe
             matches = [m for m in available if m == candidate or m.startswith(candidate + "-")]
             if matches:
-                chosen = sorted(matches)[-1]  # plus recent en dernier alphabetiquement
+                chosen = sorted(matches)[-1]
                 print(f"[U-ALPHA][Gemini] Modele selectionne : {chosen}")
                 return chosen
     except Exception as e:
@@ -165,7 +164,7 @@ def _pick_best_gemini_model(client) -> str:
     return "gemini-1.5-pro"
 
 
-def analyze_video_gemini(video_path: str, api_key: str) -> dict:
+def analyze_video_gemini(video_path: str, api_key: str, max_retries: int = 5) -> dict:
     """Envoie la video a Gemini (meilleur modele disponible) et retourne le JSON d'analyse."""
     try:
         from google import genai
@@ -176,8 +175,6 @@ def analyze_video_gemini(video_path: str, api_key: str) -> dict:
         sys.exit(1)
 
     client = genai.Client(api_key=api_key)
-
-    # Selection automatique du meilleur modele disponible
     model_id = _pick_best_gemini_model(client)
 
     print("[U-ALPHA][Gemini] Upload video en cours...")
@@ -196,28 +193,50 @@ def analyze_video_gemini(video_path: str, api_key: str) -> dict:
         sys.exit(1)
 
     print(f"[U-ALPHA][Gemini] Analyse en cours avec {model_id}...")
-    response = client.models.generate_content(
-        model=model_id,
-        contents=[video_file, GEMINI_PROMPT]
-    )
 
-    # Nettoyage si Gemini entoure le JSON de balises markdown
-    raw = response.text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=model_id,
+                contents=[video_file, GEMINI_PROMPT],
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.2,
+                    max_output_tokens=8192,
+                )
+            )
 
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError as e:
-        print(f"[U-ALPHA][Gemini] ERREUR parsing JSON : {e}")
-        print(f"  Reponse brute (500 premiers chars) : {raw[:500]}")
-        sys.exit(1)
+            raw = response.text.strip() if response.text else ""
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            raw = raw.strip()
 
-    client.files.delete(name=video_file.name)
-    return result
+            result = json.loads(raw)
+            client.files.delete(name=video_file.name)
+            return result
+
+        except json.JSONDecodeError as e:
+            print(f"[U-ALPHA][Gemini] ERREUR parsing JSON (tentative {attempt+1}) : {e}")
+            print(f"  Reponse brute : {raw[:300]}")
+            if attempt < max_retries - 1:
+                time.sleep(5)
+
+        except Exception as e:
+            err_str = str(e)
+            is_rate_limit = "429" in err_str or "resource_exhausted" in err_str.lower() or "rate" in err_str.lower()
+            if is_rate_limit:
+                wait = 65
+                print(f"[U-ALPHA][Gemini] Rate limit 429 — attente {wait}s puis retry ({attempt+1}/{max_retries})")
+            else:
+                wait = (attempt + 1) * 5
+                print(f"[U-ALPHA][Gemini] Erreur tentative {attempt+1} : {err_str[:200]}")
+            if attempt < max_retries - 1:
+                time.sleep(wait)
+
+    print(f"[U-ALPHA][Gemini] ECHEC apres {max_retries} tentatives.")
+    sys.exit(1)
 
 
 def filter_segments(gemini_data: dict, min_quality: float = 0.6) -> list:
