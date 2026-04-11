@@ -230,16 +230,17 @@ GEMINI_RESPONSE_SCHEMA = {
 # NOTE : les noms exacts sont resolus dynamiquement depuis ListModels
 #        pour s'adapter aux modeles reellement disponibles sur le compte.
 _GEMINI_FAMILIES = [
-    "gemini-2.5-pro",          # Qualite maximale — quota tres limite en free tier
-    "gemini-2.5-flash",        # Bon equilibre qualite/quota
-    "gemini-2.5-flash-lite",   # Modele recommande (15 RPM free / 4000 RPM Tier 1)
+    "gemini-2.5-flash-lite",   # DEPART — 15 RPM / 1000 RPD free | 4000 RPM / 14000 RPD Tier 1
+    "gemini-2.5-flash",        # Fallback 1 — 10 RPM / 500 RPD free | 2000 RPM Tier 1
+    "gemini-2.5-pro",          # Fallback 2 — 5 RPM / 25 RPD free | 1000 RPM Tier 1
     "gemini-1.5-pro",          # Fallback legacy
 ]
 
 # Sous-chaines a exclure lors du matching : modeles non-video ou sous-optimaux
+# NOTE : "-lite" est intentionnellement ABSENT — gemini-2.5-flash-lite est valide
 _AVOID_IN_MODEL = (
     "-audio", "-native-audio", "-tts", "-embedding",
-    "-aqa", "-lite", "-nano", "-it",
+    "-aqa", "-nano", "-it",
 )
 
 # Suffixes de modeles non-vision a exclure dans ListModels
