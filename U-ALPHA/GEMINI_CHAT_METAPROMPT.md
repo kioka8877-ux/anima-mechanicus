@@ -1,7 +1,7 @@
 # GEMINI CHAT — META-PROMPT ANIMA-MECHANICUS U-ALPHA
 
 > **Mode sans API** : colle ce prompt dans [gemini.google.com](https://gemini.google.com),
-> uploade ta video `.mp4`, et recupere le JSON que Alpha utilisera directement.
+> uploade ta video `.mp4`, et recupere le JSON que la Cellule 4b utilisera directement.
 
 ---
 
@@ -60,8 +60,8 @@ FORMAT EXACT ATTENDU :
 RÈGLES D'ÉVALUATION OBLIGATOIRES :
 
 --- VISIBILITÉ DU CORPS ---
-- corps_visible "complet"       = tête + torse + bras + jambes tous visibles simultanément
-- corps_visible "tronc"         = tête + torse + bras visibles, jambes absentes ou partiellement coupées
+- corps_visible "complet"        = tête + torse + bras + jambes tous visibles simultanément
+- corps_visible "tronc"          = tête + torse + bras visibles, jambes absentes ou partiellement coupées
 - corps_visible "tete_seulement" = seule la tête ou le buste sans bras est visible (plan serré visage/épaules)
 
 --- EXTRACTION POSSIBLE ET MODELE RECOMMANDE ---
@@ -80,123 +80,45 @@ Ces deux champs se déduisent directement de corps_visible + qualite_estimee :
 --- QUALITE ---
 - qualite_estimee 1.0  = corps complet, face caméra, lumière parfaite, sans flou, sans occlusion
 - qualite_estimee 0.6  = seuil minimum pour corps_complet et tronc
-- qualite_estimee 0.5  = seuil minimum pour tete_seulement (les modèles de tête tolèrent les gros plans)
+- qualite_estimee 0.5  = seuil minimum pour tete_seulement
 - qualite_estimee < seuil → extraction_possible "aucune" + modele_recommande "skip"
 
 --- SEGMENTATION ---
-- Découper en segments précis : ne pas mettre un seul segment couvrant toute la durée si la qualité ou la visibilité varie
-- Les timestamps doivent couvrir toute la durée de la vidéo (pas de trous non justifiés)
-- Si une personne n'est pas visible sur un passage, créer un segment_exclu avec raison "personne_absente"
-- Si la vidéo alterne entre plan large (corps complet) et plan serré (tête seulement), créer des segments distincts pour chaque type
-- Durée minimale d'un segment_valide : 1.5 secondes. En dessous de 1.5s → fusionner avec le segment adjacent de même type, ou mettre dans segments_exclus avec raison "trop_court"
-- "trop_court" est une valeur valide pour le champ "raison" des segments_exclus
+- Découper en segments précis si la qualité ou la visibilité varie
+- Les timestamps doivent couvrir toute la durée (pas de trous non justifiés)
+- Si une personne n'est pas visible sur un passage → segment_exclu raison "personne_absente"
+- Si la vidéo alterne entre plan large et plan serré → segments distincts par type
+- Durée minimale d'un segment_valide : 1.5 secondes. En dessous → fusionner ou segments_exclus raison "trop_court"
 
 --- AUTRES RÈGLES ---
-- Créer un person_id distinct (1, 2, 3...) pour chaque personne présente dans la vidéo
-- zoom_detecte = true uniquement si la caméra zoome ou dé-zoome visiblement pendant la vidéo
-- Si une personne a qualite_estimee >= seuil sur toute la durée, mettre segments_exclus = []
-- type_mouvement "discussion" = personne debout ou assise qui parle, gestes de conversation, peu de déplacement
+- Créer un person_id distinct (1, 2, 3...) pour chaque personne présente
+- zoom_detecte = true uniquement si la caméra zoome ou dé-zoome visiblement
+- type_mouvement "discussion" = personne qui parle avec gestes, peu de déplacement
 
 IMPORTANT :
 - Retourne UNIQUEMENT le JSON brut. Pas de ```json```. Pas d'explication. Juste le JSON.
 - Respecte EXACTEMENT les valeurs d'enum listées (minuscules, underscores comme indiqué).
-- Si tu ne sais pas exactement, estime plutôt que d'omettre un champ.
-- Un gros plan visage dans une vidéo de discussion est NORMAL et doit produire extraction_possible "tete_cou", pas être exclu.
+- Un gros plan visage dans une vidéo de discussion est NORMAL → extraction_possible "tete_cou", pas exclu.
 ```
 
 ---
 
-## ETAPE 2 — Recuperer le nom du fichier cache
+## ETAPE 2 — Injecter le JSON dans le notebook (Cellule 4b)
 
-Une fois que Gemini t'a donne le JSON, il faut le sauvegarder avec le bon nom
-pour qu'Alpha le detecte automatiquement.
+Une fois Gemini t'a retourne le JSON :
 
-**Dans Colab, avant de lancer la Cellule 5, execute cette cellule temporaire :**
+1. Dans le notebook Colab, **execute la Cellule 4b**
+2. Une zone de texte apparait
+3. **Colle le JSON complet** dans la zone
+4. Clique **"Valider et injecter"**
 
-```python
-# ══ Cellule temporaire : trouver le nom du fichier cache ══
-import hashlib, os
-with open(VIDEO_PATH, "rb") as f:
-    chunk = f.read(1024 * 1024)  # premier Mo
-h = hashlib.md5(chunk).hexdigest()[:10]
-stem = os.path.splitext(os.path.basename(VIDEO_PATH))[0]
-cache_filename = f"gemini_cache_{stem}_{h}.json"
-print(f"Nom du fichier : {cache_filename}")
-print(f"Chemin complet : /content/gemini_cache/{cache_filename}")
-```
+Alpha va automatiquement :
+- Valider le JSON
+- Afficher le routing par segment (WHAM / FrankMocap / DECA / skip)
+- Sauvegarder le cache
+- Preparer `ALL_SEGMENTS` pour la suite
 
-Ce code t'affichera quelque chose comme :
-```
-Nom du fichier : gemini_cache_ma_video_a3f9b12c4d.json
-Chemin complet : /content/gemini_cache/gemini_cache_ma_video_a3f9b12c4d.json
-```
-
----
-
-## ETAPE 3 — Sauvegarder le JSON dans le cache
-
-Dans Colab, execute cette cellule en remplacant `TON_JSON_ICI` par le JSON
-copie depuis Gemini Chat :
-
-```python
-# ══ Cellule temporaire : sauvegarder le JSON Gemini ══
-import json, os
-
-# Colle le JSON complet fourni par Gemini Chat entre les triples guillemets
-JSON_GEMINI = """
-{
-  "video_duration_seconds": ...,
-  "source_fps": ...,
-  ...
-}
-"""
-
-# Creer le dossier cache si besoin
-os.makedirs("/content/gemini_cache", exist_ok=True)
-
-# Valider que le JSON est bien forme
-data = json.loads(JSON_GEMINI.strip())
-print(f"  JSON valide : {len(data['persons'])} personne(s) detectee(s)")
-print(f"  Duree : {data['video_duration_seconds']}s | Qualite : {data['qualite_globale']}")
-
-# Afficher le routing par segment
-for p in data['persons']:
-    print(f"\n  Personne {p['person_id']} :")
-    for seg in p['segments_valides']:
-        print(f"    [{seg['start_s']}s → {seg['end_s']}s] "
-              f"corps={seg['corps_visible']} | "
-              f"extraction={seg['extraction_possible']} | "
-              f"modele={seg['modele_recommande']}")
-
-# Sauvegarder avec le bon nom de fichier cache
-import hashlib
-with open(VIDEO_PATH, "rb") as f:
-    chunk = f.read(1024 * 1024)
-h = hashlib.md5(chunk).hexdigest()[:10]
-stem = os.path.splitext(os.path.basename(VIDEO_PATH))[0]
-cache_path = f"/content/gemini_cache/gemini_cache_{stem}_{h}.json"
-
-with open(cache_path, "w", encoding="utf-8") as f:
-    json.dump(data, f, ensure_ascii=False, indent=2)
-
-print(f"\n  Cache sauvegarde : {cache_path}")
-print("  Lance maintenant la Cellule 5 — Gemini ne sera PAS appele (0 quota consomme)")
-```
-
----
-
-## ETAPE 4 — Lancer la Cellule 5 normalement
-
-Une fois le JSON sauvegarde dans le cache, lance la Cellule 5 comme d'habitude.
-Alpha detectera le fichier cache et affichera :
-
-```
-[U-ALPHA][Gemini] Cache hit — 0 requete consommee
-  (Supprimer /content/gemini_cache/gemini_cache_xxx.json pour forcer une re-analyse)
-```
-
-**La cle API n'est plus necessaire pour cette video.** Tu peux laisser `GEMINI_API_KEY = ""`
-dans la Cellule 2 si tu utilises uniquement le mode cache.
+5. **Passe directement a la Cellule 6** — Cellule 5 est ignoree automatiquement
 
 ---
 
@@ -207,34 +129,36 @@ dans la Cellule 2 si tu utilises uniquement le mode cache.
    └─ Upload video + colle le prompt ci-dessus
    └─ Copie le JSON retourne
 
-2. Colab : execute la cellule "sauvegarder le JSON"
-   └─ JSON valide → affiche le routing par segment
-   └─ Sauvegarde automatique avec le bon nom de cache
+2. Colab — Cellule 4b
+   └─ Colle le JSON → Valider et injecter
+   └─ Routing affiche → ALL_SEGMENTS pret
 
-3. Colab : lance Cellule 5
-   └─ Alpha lit le cache → routing automatique par segment → pipeline adapte
+3. Colab — Cellules 6, 7, 8
+   └─ Validation → WHAM → Telechargement .npz
 ```
+
+> La cle API Gemini n'est pas requise en mode chat.
+> Tu peux laisser `GEMINI_API_KEY = ""` dans la Cellule 2.
 
 ---
 
-## Tableau de routing — ce qu'Alpha fera selon le JSON
+## Tableau de routing
 
-| extraction_possible | modele_recommande | FBX produit                          |
+| extraction_possible | modele_recommande | Ce qu'Alpha fait                     |
 |---------------------|-------------------|--------------------------------------|
 | corps_complet       | WHAM              | Squelette complet (tous les os)      |
-| haut_du_corps       | FrankMocap_upper  | Torse + bras animes, jambes T-pose   |
-| tete_cou            | DECA              | Rotation tete + cou uniquement       |
+| haut_du_corps       | FrankMocap_upper  | Non implemente — segment en attente  |
+| tete_cou            | DECA              | Non implemente — segment en attente  |
 | aucune              | skip              | Segment ignore                       |
+
+> FrankMocap et DECA seront implements dans une version future.
+> Pour l'instant, seuls les segments WHAM (`corps_complet`) sont traites.
 
 ---
 
 ## Notes importantes
 
-- **Taille video** : Gemini Chat accepte les videos jusqu'a ~1 Go en general
-- **Qualite de l'analyse** : Gemini 2.5 Pro dans le chat est plus puissant que les modeles free tier API
-- **Videos de discussion** : les gros plans visage sont normaux et produisent des segments `tete_cou` utiles — ils ne sont pas exclus
-- **Reutilisation** : le cache est lie a la video par MD5. Si tu re-uploades la meme video,
-  le cache est reutilise automatiquement. Si tu modifies la video, il faut regenerer le cache.
-- **Plusieurs videos** : repete les etapes 1-3 pour chaque video. Les fichiers cache s'accumulent
-  dans `/content/gemini_cache/` sans conflit.
-
+- **Taille video** : Gemini Chat accepte les videos jusqu'a ~1 Go
+- **Qualite de l'analyse** : Gemini 2.5 Pro dans le chat est plus puissant que les modeles API free tier
+- **Reutilisation** : le cache est lie a la video par MD5. Meme video = cache reutilise automatiquement
+- **Plusieurs videos** : repete les etapes 1-2 pour chaque video
