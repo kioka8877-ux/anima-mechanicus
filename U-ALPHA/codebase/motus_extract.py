@@ -84,9 +84,11 @@ EXTREMITY_BONE_NAMES = {
 }
 EXTREMITY_INDICES = [i for i, name in enumerate(BONE_NAMES) if name in EXTREMITY_BONE_NAMES]
 
-GEMINI_PROMPT = """Tu es un analyseur de vidéo expert en motion capture. Analyse cette vidéo et retourne UNIQUEMENT un JSON valide, sans markdown, sans explication.
+GEMINI_PROMPT = """Tu es un analyseur de vidéo expert en motion capture humaine.
+Analyse la vidéo et retourne UNIQUEMENT un bloc JSON valide, sans markdown, sans explication.
+Commence directement par { et termine par }.
 
-Format attendu :
+FORMAT EXACT ATTENDU :
 {
   "video_duration_seconds": <float>,
   "source_fps": <int>,
@@ -98,38 +100,56 @@ Format attendu :
         {
           "start_s": <float>,
           "end_s": <float>,
-          "corps_visible": "<complet|partiel|tete_seulement>",
-          "orientation": "<face|profil|dos|mixte>",
-          "distance_camera": "<proche|moyen|lointain>",
-          "type_mouvement": "<marche|danse|combat|sport|statique>",
+          "corps_visible": "<EXACTEMENT : complet | tronc | tete_seulement>",
+          "orientation": "<EXACTEMENT : face | profil | dos | mixte>",
+          "distance_camera": "<EXACTEMENT : proche | moyen | lointain>",
+          "type_mouvement": "<EXACTEMENT : marche | danse | combat | sport | statique | discussion>",
           "qualite_estimee": <float 0.0-1.0>,
-          "problemes": []
+          "problemes": [],
+          "extraction_possible": "<EXACTEMENT : corps_complet | haut_du_corps | tete_cou | aucune>",
+          "modele_recommande": "<EXACTEMENT : WHAM | FrankMocap_upper | DECA | skip>"
         }
       ],
       "segments_exclus": [
         {
           "start_s": <float>,
           "end_s": <float>,
-          "raison": "<personne_absente|flou_mouvement|occlusion_totale|contre_jour>"
+          "raison": "<EXACTEMENT : personne_absente | flou_mouvement | occlusion_totale | contre_jour | trop_court>"
         }
       ]
     }
   ],
   "camera": {
-    "mouvement": "<stable|panoramique|suivi|agitee>",
+    "mouvement": "<EXACTEMENT : stable | panoramique | suivi | agitee>",
     "zoom_detecte": <bool>
   },
-  "qualite_globale": "<excellente|bonne|moyenne|mauvaise>",
+  "qualite_globale": "<EXACTEMENT : excellente | bonne | moyenne | mauvaise>",
   "recommandation": "<string>"
 }
 
-Règles d'évaluation :
-- corps_visible "complet" : tête + torse + bras + jambes tous visibles
-- corps_visible "partiel" : au moins torse + 1 membre visible
-- qualite_estimee 1.0 = corps complet, face caméra, bonne lumière, sans flou
-- qualite_estimee 0.6 = minimum utilisable pour motion capture
-- qualite_estimee < 0.6 = mettre le segment dans segments_exclus
-- zoom_detecte true si la caméra zoome ou dé-zoome visiblement
+RÈGLES DE VISIBILITÉ :
+- corps_visible "complet"       = tête + torse + bras + jambes tous visibles
+- corps_visible "tronc"         = tête + torse + bras visibles, jambes absentes ou coupées
+- corps_visible "tete_seulement" = seule la tête ou le buste sans bras (plan serré visage)
+
+RÈGLES DE ROUTING (extraction_possible + modele_recommande) :
+- complet   + qualite >= 0.6 → extraction_possible "corps_complet"  + modele_recommande "WHAM"
+- tronc     + qualite >= 0.6 → extraction_possible "haut_du_corps"  + modele_recommande "FrankMocap_upper"
+- tete_seulement + qualite >= 0.5 → extraction_possible "tete_cou"  + modele_recommande "DECA"
+- qualite sous seuil          → extraction_possible "aucune"         + modele_recommande "skip"
+
+RÈGLES DE SEGMENTATION :
+- Durée minimale d'un segment_valide : 1.5 secondes
+- Segment < 1.5s → fusionner avec adjacent de même type, ou segments_exclus avec raison "trop_court"
+- Découper en segments distincts si la visibilité change (ex : plan large → gros plan)
+- Les timestamps doivent couvrir toute la durée (pas de trous non justifiés)
+- Un gros plan visage est NORMAL dans une vidéo de discussion → segment tete_seulement valide, pas exclu
+
+RÈGLES QUALITÉ :
+- qualite_estimee 1.0 = corps complet, face caméra, lumière parfaite, sans flou
+- qualite_estimee 0.6 = seuil minimum pour complet et tronc
+- qualite_estimee 0.5 = seuil minimum pour tete_seulement
+- zoom_detecte = true uniquement si la caméra zoome/dé-zoome visiblement
 - Créer un person_id distinct par personne présente dans la vidéo
 """
 
@@ -153,23 +173,29 @@ GEMINI_RESPONSE_SCHEMA = {
                         "items": {
                             "type": "OBJECT",
                             "properties": {
-                                "start_s":         {"type": "NUMBER"},
-                                "end_s":           {"type": "NUMBER"},
-                                "corps_visible":   {"type": "STRING",
-                                                   "enum": ["complet", "partiel", "tete_seulement"]},
-                                "orientation":     {"type": "STRING",
-                                                   "enum": ["face", "profil", "dos", "mixte"]},
-                                "distance_camera": {"type": "STRING",
-                                                   "enum": ["proche", "moyen", "lointain"]},
-                                "type_mouvement":  {"type": "STRING",
-                                                   "enum": ["marche", "danse", "combat", "sport", "statique"]},
-                                "qualite_estimee": {"type": "NUMBER"},
-                                "problemes":       {"type": "ARRAY",
-                                                   "items": {"type": "STRING"}},
+                                "start_s":             {"type": "NUMBER"},
+                                "end_s":               {"type": "NUMBER"},
+                                "corps_visible":       {"type": "STRING",
+                                                       "enum": ["complet", "tronc", "tete_seulement"]},
+                                "orientation":         {"type": "STRING",
+                                                       "enum": ["face", "profil", "dos", "mixte"]},
+                                "distance_camera":     {"type": "STRING",
+                                                       "enum": ["proche", "moyen", "lointain"]},
+                                "type_mouvement":      {"type": "STRING",
+                                                       "enum": ["marche", "danse", "combat", "sport",
+                                                                "statique", "discussion"]},
+                                "qualite_estimee":     {"type": "NUMBER"},
+                                "problemes":           {"type": "ARRAY",
+                                                       "items": {"type": "STRING"}},
+                                "extraction_possible": {"type": "STRING",
+                                                       "enum": ["corps_complet", "haut_du_corps",
+                                                                "tete_cou", "aucune"]},
+                                "modele_recommande":   {"type": "STRING",
+                                                       "enum": ["WHAM", "FrankMocap_upper", "DECA", "skip"]},
                             },
                             "required": ["start_s", "end_s", "corps_visible", "orientation",
                                          "distance_camera", "type_mouvement", "qualite_estimee",
-                                         "problemes"],
+                                         "problemes", "extraction_possible", "modele_recommande"],
                         }
                     },
                     "segments_exclus": {
@@ -181,7 +207,7 @@ GEMINI_RESPONSE_SCHEMA = {
                                 "end_s":   {"type": "NUMBER"},
                                 "raison":  {"type": "STRING",
                                            "enum": ["personne_absente", "flou_mouvement",
-                                                    "occlusion_totale", "contre_jour"]},
+                                                    "occlusion_totale", "contre_jour", "trop_court"]},
                             },
                             "required": ["start_s", "end_s", "raison"],
                         }
@@ -608,22 +634,65 @@ def analyze_video_gemini(
 
 
 def filter_segments(gemini_data: dict, min_quality: float = 0.6) -> list:
-    """Filtre les segments selon la qualité et retourne la liste à traiter."""
+    """Filtre les segments selon la qualité et le routing modele.
+
+    Logique de routing :
+    - modele_recommande "WHAM"            → inclus si qualite >= min_quality
+    - modele_recommande "FrankMocap_upper" → inclus (qualite seuil 0.6), marqué WARN (non implémenté)
+    - modele_recommande "DECA"             → inclus (qualite seuil 0.5), marqué WARN (non implémenté)
+    - modele_recommande "skip" / aucune    → exclu
+    - Ancien format sans modele_recommande → compatibilité descendante via corps_visible
+    """
     segments = []
     for person in gemini_data.get("persons", []):
         pid = person["person_id"]
         for seg in person.get("segments_valides", []):
-            if seg["qualite_estimee"] < min_quality:
-                print(f"  [FILTRE] P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
-                      f"qualité {seg['qualite_estimee']:.2f} < {min_quality} → exclu")
-                continue
-            if seg["corps_visible"] == "tete_seulement":
-                print(f"  [FILTRE] P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
-                      f"corps non visible → exclu")
-                continue
-            if seg["corps_visible"] == "partiel":
-                print(f"  [WARN]   P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
-                      f"corps partiel — WHAM peut halluciner les membres manquants")
+            qual = seg["qualite_estimee"]
+            corps = seg.get("corps_visible", "")
+            modele = seg.get("modele_recommande", "")
+            extraction = seg.get("extraction_possible", "")
+
+            # ── Routing nouveau format (modele_recommande présent) ──────────
+            if modele:
+                if modele == "skip" or extraction == "aucune":
+                    print(f"  [SKIP]   P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
+                          f"modele=skip → exclu")
+                    continue
+                if modele == "WHAM":
+                    if qual < min_quality:
+                        print(f"  [FILTRE] P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
+                              f"qualité {qual:.2f} < {min_quality} → exclu")
+                        continue
+                elif modele == "FrankMocap_upper":
+                    if qual < min_quality:
+                        print(f"  [FILTRE] P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
+                              f"qualité {qual:.2f} < {min_quality} → exclu")
+                        continue
+                    print(f"  [WARN]   P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
+                          f"FrankMocap_upper non implémenté — segment inclus, WHAM utilisé en fallback")
+                elif modele == "DECA":
+                    if qual < 0.5:
+                        print(f"  [FILTRE] P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
+                              f"qualité {qual:.2f} < 0.5 → exclu")
+                        continue
+                    print(f"  [WARN]   P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
+                          f"DECA non implémenté — segment marqué, ignoré par WHAM")
+                    seg = {**seg, "_skip_wham": True}
+
+            # ── Compatibilité descendante (ancien format sans modele_recommande) ──
+            else:
+                if qual < min_quality:
+                    print(f"  [FILTRE] P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
+                          f"qualité {qual:.2f} < {min_quality} → exclu")
+                    continue
+                if corps == "tete_seulement":
+                    print(f"  [FILTRE] P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
+                          f"tete_seulement (ancien format) → exclu")
+                    continue
+                if corps in ("partiel", "tronc"):
+                    print(f"  [WARN]   P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
+                          f"corps partiel — WHAM peut halluciner les membres manquants")
+
             segments.append({"person_id": pid, **seg})
     return segments
 
