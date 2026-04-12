@@ -44,7 +44,7 @@ FORMAT EXACT ATTENDU :
         {
           "start_s": <décimal>,
           "end_s": <décimal>,
-          "raison": "<EXACTEMENT l'une de ces valeurs : personne_absente | flou_mouvement | occlusion_totale | contre_jour>"
+          "raison": "<EXACTEMENT l'une de ces valeurs : personne_absente | flou_mouvement | occlusion_totale | contre_jour | trop_court>"
         }
       ]
     }
@@ -88,6 +88,8 @@ Ces deux champs se déduisent directement de corps_visible + qualite_estimee :
 - Les timestamps doivent couvrir toute la durée de la vidéo (pas de trous non justifiés)
 - Si une personne n'est pas visible sur un passage, créer un segment_exclu avec raison "personne_absente"
 - Si la vidéo alterne entre plan large (corps complet) et plan serré (tête seulement), créer des segments distincts pour chaque type
+- Durée minimale d'un segment_valide : 1.5 secondes. En dessous de 1.5s → fusionner avec le segment adjacent de même type, ou mettre dans segments_exclus avec raison "trop_court"
+- "trop_court" est une valeur valide pour le champ "raison" des segments_exclus
 
 --- AUTRES RÈGLES ---
 - Créer un person_id distinct (1, 2, 3...) pour chaque personne présente dans la vidéo
@@ -235,3 +237,4 @@ dans la Cellule 2 si tu utilises uniquement le mode cache.
   le cache est reutilise automatiquement. Si tu modifies la video, il faut regenerer le cache.
 - **Plusieurs videos** : repete les etapes 1-3 pour chaque video. Les fichiers cache s'accumulent
   dans `/content/gemini_cache/` sans conflit.
+
