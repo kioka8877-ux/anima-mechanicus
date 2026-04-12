@@ -147,12 +147,12 @@ Alpha va automatiquement :
 | extraction_possible | modele_recommande | Ce qu'Alpha fait                     |
 |---------------------|-------------------|--------------------------------------|
 | corps_complet       | WHAM              | Squelette complet (tous les os)      |
-| haut_du_corps       | FrankMocap_upper  | Non implemente — segment en attente  |
-| tete_cou            | DECA              | Non implemente — segment en attente  |
-| aucune              | skip              | Segment ignore                       |
+| haut_du_corps       | FrankMocap_upper  | WHAM en fallback — membres inferieurs hallucines |
+| tete_cou            | DECA              | Non implemente — segment ignore                  |
+| aucune              | skip              | Segment ignore                                   |
 
-> FrankMocap et DECA seront implements dans une version future.
-> Pour l'instant, seuls les segments WHAM (`corps_complet`) sont traites.
+> FrankMocap (haut_du_corps) est traite en fallback par WHAM : les jambes/bassin sont hallucines dans le .npz — verifier visuellement avant envoi a U-GAMMA.
+> DECA (tete_cou) n'est pas encore implemente — ces segments sont ignores.
 
 ---
 
@@ -162,3 +162,4 @@ Alpha va automatiquement :
 - **Qualite de l'analyse** : Gemini 2.5 Pro dans le chat est plus puissant que les modeles API free tier
 - **Reutilisation** : le cache est lie a la video par MD5. Meme video = cache reutilise automatiquement
 - **Plusieurs videos** : repete les etapes 1-2 pour chaque video
+
