@@ -21,7 +21,7 @@ Anciennement connu sous le nom de **MOTUS-VIGILUS** (MediaPipe). Cette version r
 | Frégate | Script | Rôle | Input | Output |
 |---------|--------|------|-------|--------|
 | **U-ALPHA** (L'Auspex Cogitateur) | `U-ALPHA/codebase/motus_extract.py` | Analyse Gemini + Extraction WHAM + Transmutation SMPL→R15 | `.mp4` | `.npz` |
-| **U-GAMMA** (La Forge) | `U-GAMMA/codebase/motus_forge.py` | Manifestation FBX via Blender headless | `.npz` + `.blend` | `.fbx` |
+| **U-GAMMA** (La Forge) | `U-GAMMA/codebase/motus_forge.py` | Manifestation FBX via Blender headless | `.npz` | `.fbx` |
 
 ---
 
@@ -255,13 +255,11 @@ ANIMA-MECHANICUS/
 │   ├── inputs/                    # Vidéos .mp4 sources
 │   ├── outputs/                   # Fichiers .npz extraits
 │   └── ANIMA_MECHANICUS_ALPHA.ipynb
-├── U-GAMMA/                       # Frégate U-GAMMA (inchangée)
+├── U-GAMMA/                       # Frégate U-GAMMA
 │   ├── codebase/
-│   │   └── motus_forge.py         # Script Blender headless
+│   │   └── motus_forge.py         # Script Blender headless (rig R15 généré programmatiquement)
 │   ├── inputs/                    # Fichiers .npz
 │   ├── outputs/                   # Fichiers .fbx
-│   ├── templates/
-│   │   └── r15_template.blend     # Template armature R15
 │   └── ANIMA_MECHANICUS_GAMMA.ipynb
 ├── README.md
 └── requirements.txt
