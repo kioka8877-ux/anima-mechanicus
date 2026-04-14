@@ -21,6 +21,19 @@
 - ANIMA_MECHANICUS_GAMMA.ipynb : COMPLETE — notebook Colab 4 cellules, sans template
 - Toutes les dependances externes eliminees (pipeline 100% autonome)
 
+### 5 fixes dependances appliques (Avril 2026)
+
+| Fix | Detail |
+|-----|--------|
+| numpy 1.24.4 | Version pinnée dans requirements.txt — compatibilite garantie torch/scipy/WHAM |
+| mmcv 2.0.1 | Migration mmcv 1.3.9 → 2.0.1 — API unifiee, compatible Colab T4 |
+| Checkpoints WHAM | Chemins verifies et documentes dans ALPHA Cellule 1 |
+| r15_template.blend | Fichier supprime — rig R15 genere 100% programmatiquement depuis v4 |
+| requirements.txt | Versions pinees pour toutes les dependances critiques |
+
+Fichiers impactes : `ANIMA_MECHANICUS_ALPHA.ipynb` (Cellule 1), `requirements.txt`, README.md
+Fichiers non impactes : `motus_extract.py`, `motus_forge.py`, `ANIMA_MECHANICUS_GAMMA.ipynb`
+
 ---
 
 ## [NEXT_TASK]
@@ -55,6 +68,8 @@ Phase 5 — Validation imperiale :
 | SMPL 24 joints → R15 15 os | Mapping fixe dans motus_extract.py |
 | r15_template.blend manquant | Rig R15 genere programmatiquement dans motus_forge.py v4 |
 | Blender headless lent | Template supprime → demarrage plus rapide |
+| mmcv conflit de version | Migration 1.3.9 → 2.0.1 — API unifiee et stable |
+| numpy incompatibilite | Version pinnée 1.24.4 — compatible torch + scipy + WHAM |
 
 ---
 
