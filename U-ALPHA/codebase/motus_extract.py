@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""ANIMA-MECHANICUS — Frégate U-ALPHA : L'Auspex Cogitateur — v3
-Pipeline : Gemini (analyse + cascade anti-429) → WHAM (SMPL) → SMPL→R15 → .npz
+"""ANIMA-MECHANICUS — Frégate U-ALPHA : L'Auspex Cogitateur — v4
+Pipeline : Gemini (analyse + cascade anti-429) → GVHMR (SMPL) → SMPL→R15 → .npz
 
 Usage:
     python motus_extract.py video.mp4 --gemini-keys CLE1,CLE2 [options]
@@ -13,7 +13,7 @@ Options:
     --no-root-motion                 Désactive la translation globale
     --quality-threshold F            Score Gemini minimum (défaut: 0.6)
     --output DIR                     Dossier de sortie (défaut: outputs/)
-    --wham-dir DIR                   Chemin vers le dépôt WHAM (défaut: ~/WHAM)
+    --gvhmr-dir DIR                  Chemin vers le dépôt GVHMR (défaut: ~/GVHMR)
     --cache-dir DIR                  Cache résultats Gemini (évite re-analyse, défaut: désactivé)
     --start-model N                  Démarre la cascade au modèle N (0=pro, 1=2.5flash, 2=2.0flash, 3=1.5flash)
 """
@@ -637,11 +637,11 @@ def filter_segments(gemini_data: dict, min_quality: float = 0.6) -> list:
     """Filtre les segments selon la qualité et le routing modele.
 
     Logique de routing :
-    - modele_recommande "WHAM"            → inclus si qualite >= min_quality
-    - modele_recommande "FrankMocap_upper" → inclus (qualite seuil 0.6), marqué WARN (non implémenté)
-    - modele_recommande "DECA"             → inclus (qualite seuil 0.5), marqué WARN (non implémenté)
-    - modele_recommande "skip" / aucune    → exclu
-    - Ancien format sans modele_recommande → compatibilité descendante via corps_visible
+    - modele_recommande "WHAM" ou "GVHMR"  → inclus si qualite >= min_quality
+    - modele_recommande "FrankMocap_upper"  → inclus (qualite seuil 0.6), marqué _mask_lower_body
+    - modele_recommande "DECA"              → inclus (qualite seuil 0.5), marqué _skip_gvhmr
+    - modele_recommande "skip" / aucune     → exclu
+    - Ancien format sans modele_recommande  → compatibilité descendante via corps_visible
     """
     segments = []
     for person in gemini_data.get("persons", []):
@@ -658,7 +658,8 @@ def filter_segments(gemini_data: dict, min_quality: float = 0.6) -> list:
                     print(f"  [SKIP]   P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
                           f"modele=skip → exclu")
                     continue
-                if modele == "WHAM":
+                if modele in ("WHAM", "GVHMR"):
+                    # WHAM = valeur legacy Gemini, traité identiquement à GVHMR depuis V4
                     if qual < min_quality:
                         print(f"  [FILTRE] P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
                               f"qualité {qual:.2f} < {min_quality} → exclu")
@@ -668,16 +669,17 @@ def filter_segments(gemini_data: dict, min_quality: float = 0.6) -> list:
                         print(f"  [FILTRE] P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
                               f"qualité {qual:.2f} < {min_quality} → exclu")
                         continue
-                    print(f"  [WARN]   P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
-                          f"FrankMocap_upper non implémenté — segment inclus, WHAM utilisé en fallback")
+                    print(f"  [INFO]   P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
+                          f"haut du corps uniquement — GVHMR + masquage joints inférieurs")
+                    seg = {**seg, "_mask_lower_body": True}
                 elif modele == "DECA":
                     if qual < 0.5:
                         print(f"  [FILTRE] P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
                               f"qualité {qual:.2f} < 0.5 → exclu")
                         continue
                     print(f"  [WARN]   P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
-                          f"DECA non implémenté — segment marqué, ignoré par WHAM")
-                    seg = {**seg, "_skip_wham": True}
+                          f"DECA non implémenté — segment ignoré par GVHMR")
+                    seg = {**seg, "_skip_gvhmr": True}
 
             # ── Compatibilité descendante (ancien format sans modele_recommande) ──
             else:
@@ -690,8 +692,9 @@ def filter_segments(gemini_data: dict, min_quality: float = 0.6) -> list:
                           f"tete_seulement (ancien format) → exclu")
                     continue
                 if corps in ("partiel", "tronc"):
-                    print(f"  [WARN]   P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
-                          f"corps partiel — WHAM peut halluciner les membres manquants")
+                    print(f"  [INFO]   P{pid} {seg['start_s']:.1f}s-{seg['end_s']:.1f}s : "
+                          f"haut du corps (ancien format) — GVHMR + masquage joints inférieurs")
+                    seg = {**seg, "_mask_lower_body": True}
 
             segments.append({"person_id": pid, **seg})
     return segments
@@ -716,8 +719,15 @@ def print_gemini_report(gemini_data: dict) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MODULE 2 — EXTRACTION WHAM
+# MODULE 2 — EXTRACTION GVHMR
 # ──────────────────────────────────────────────────────────────────────────────
+
+LOWER_BODY_BONES = [
+    "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+    "RightUpperLeg", "RightLowerLeg", "RightFoot",
+]
+LOWER_BODY_INDICES = [R15_INDEX[b] for b in LOWER_BODY_BONES]
+
 
 def cut_video_segment(video_path: str, start_s: float, end_s: float, out_path: str) -> None:
     """Découpe un segment vidéo avec ffmpeg."""
@@ -730,49 +740,86 @@ def cut_video_segment(video_path: str, start_s: float, end_s: float, out_path: s
     ], check=True)
 
 
-def _extract_wham_poses(data: dict):
-    """Extrait les poses SMPL axis-angle depuis le dict WHAM. Gère plusieurs formats."""
-    if "smpl" in data and "poses" in data["smpl"]:
-        return np.array(data["smpl"]["poses"]).reshape(-1, 24, 3)
+def _extract_gvhmr_poses(data: dict):
+    """Extrait les poses SMPL axis-angle (N, 24, 3) depuis le dict GVHMR.
+
+    GVHMR stocke les paramètres SMPL mondiaux sous la clé 'smpl_params_global'.
+    Structure attendue :
+        data['smpl_params_global']['global_orient'] : (N, 3) ou (N, 1, 3)
+        data['smpl_params_global']['body_pose']     : (N, 69) ou (N, 23, 3)
+    """
+    # Format primaire GVHMR : smpl_params_global (world coordinates)
+    params = data.get("smpl_params_global") or data.get("smpl_params_incam")
+    if params is not None:
+        orient = np.array(params["global_orient"]).reshape(-1, 1, 3)   # (N, 1, 3)
+        body   = np.array(params["body_pose"]).reshape(-1, 23, 3)       # (N, 23, 3)
+        return np.concatenate([orient, body], axis=1)                   # (N, 24, 3)
+
+    # Format alternatif : poses aplaties (72 valeurs)
     if "poses" in data:
         p = np.array(data["poses"])
         if p.ndim == 2 and p.shape[1] == 72:
             return p.reshape(-1, 24, 3)
         if p.ndim == 3 and p.shape[1:] == (24, 3):
             return p
+
+    # Format alternatif : root_orient + pose_body séparés
     if "pose_body" in data and "root_orient" in data:
         root = np.array(data["root_orient"]).reshape(-1, 1, 3)
         body = np.array(data["pose_body"]).reshape(-1, 23, 3)
         return np.concatenate([root, body], axis=1)
+
     return None
 
 
-def _extract_wham_transl(data: dict, n_frames: int) -> np.ndarray:
-    """Extrait la translation depuis le dict WHAM."""
+def _extract_gvhmr_transl(data: dict, n_frames: int) -> np.ndarray:
+    """Extrait la translation mondiale depuis le dict GVHMR."""
+    params = data.get("smpl_params_global")
+    if params is not None and "transl" in params:
+        return np.array(params["transl"]).reshape(n_frames, 3)
+
     for key in ["trans", "transl", "translation"]:
         if key in data:
             return np.array(data[key])
-        if "smpl" in data and key in data["smpl"]:
-            return np.array(data["smpl"][key])
+        incam = data.get("smpl_params_incam", {})
+        if key in incam:
+            return np.array(incam[key])
+
     return np.zeros((n_frames, 3))
 
 
-def run_wham(video_path: str, segments: list, wham_dir: str, tmp_dir: str) -> dict:
+def mask_lower_body_joints(rots: np.ndarray) -> np.ndarray:
+    """Met les joints inférieurs à quaternion identité [1,0,0,0].
+
+    Utilisé pour les segments FrankMocap_upper (haut du corps uniquement) :
+    GVHMR hallucine les jambes quand elles ne sont pas visibles — on neutralise.
+    Joints masqués : LeftUpperLeg, LeftLowerLeg, LeftFoot,
+                     RightUpperLeg, RightLowerLeg, RightFoot.
     """
-    Appelle WHAM sur chaque segment validé et retourne les poses SMPL.
-    Retourne : {person_id: {"poses": {frame_idx: (24,3)}, "transl": {frame_idx: (3,)}}}
+    result = rots.copy()
+    for bi in LOWER_BODY_INDICES:
+        result[:, bi, :] = 0.0
+        result[:, bi, 0] = 1.0  # w=1 → identité
+    return result
+
+
+def run_gvhmr(video_path: str, segments: list, gvhmr_dir: str, tmp_dir: str) -> dict:
     """
-    wham_dir = Path(wham_dir).expanduser()
-    if not wham_dir.exists():
-        print(f"[U-ALPHA][WHAM] ERREUR : dépôt WHAM introuvable → {wham_dir}")
+    Appelle GVHMR sur chaque segment validé et retourne les poses SMPL.
+    Retourne : {person_id: {"poses": {frame_idx: (24,3)}, "transl": {frame_idx: (3,)},
+                            "mask_lower_body": bool}}
+    """
+    gvhmr_dir = Path(gvhmr_dir).expanduser()
+    if not gvhmr_dir.exists():
+        print(f"[U-ALPHA][GVHMR] ERREUR : dépôt GVHMR introuvable → {gvhmr_dir}")
         print("  Installer avec :")
-        print("    git clone https://github.com/yohanshin/WHAM.git ~/WHAM")
-        print("    cd ~/WHAM && pip install -r requirements.txt")
+        print("    git clone https://github.com/zju3dv/GVHMR.git ~/GVHMR")
+        print("    cd ~/GVHMR && pip install -r requirements.txt && pip install -e .")
         sys.exit(1)
 
-    demo_script = wham_dir / "demo.py"
+    demo_script = gvhmr_dir / "tools" / "demo" / "demo.py"
     if not demo_script.exists():
-        print(f"[U-ALPHA][WHAM] ERREUR : demo.py introuvable dans {wham_dir}")
+        print(f"[U-ALPHA][GVHMR] ERREUR : tools/demo/demo.py introuvable dans {gvhmr_dir}")
         sys.exit(1)
 
     cap = cv2.VideoCapture(video_path)
@@ -782,52 +829,73 @@ def run_wham(video_path: str, segments: list, wham_dir: str, tmp_dir: str) -> di
     all_tracks = {}
 
     for seg in segments:
+        if seg.get("_skip_gvhmr"):
+            continue
+
         pid = seg["person_id"]
         start_s, end_s = seg["start_s"], seg["end_s"]
-        print(f"[U-ALPHA][WHAM] P{pid} — segment {start_s:.1f}s-{end_s:.1f}s")
+        mask_lower = seg.get("_mask_lower_body", False)
+        print(f"[U-ALPHA][GVHMR] P{pid} — segment {start_s:.1f}s-{end_s:.1f}s"
+              + (" [haut_corps → masquage jambes]" if mask_lower else ""))
 
         seg_video = os.path.join(tmp_dir, f"seg_P{pid}_{int(start_s*10):06d}.mp4")
         cut_video_segment(video_path, start_s, end_s, seg_video)
 
-        wham_out = os.path.join(tmp_dir, f"wham_P{pid}_{int(start_s*10):06d}")
-        os.makedirs(wham_out, exist_ok=True)
+        gvhmr_out = os.path.join(tmp_dir, f"gvhmr_P{pid}_{int(start_s*10):06d}")
+        os.makedirs(gvhmr_out, exist_ok=True)
 
         result = subprocess.run(
             [sys.executable, str(demo_script),
              "--video", seg_video,
-             "--output_pth", wham_out,
-             "--visualize", "false"],
-            cwd=str(wham_dir),
+             "--output_root", gvhmr_out,
+             "--no_crop"],
+            cwd=str(gvhmr_dir),
             capture_output=True, text=True
         )
         if result.returncode != 0:
-            print(f"[U-ALPHA][WHAM] ERREUR segment P{pid} {start_s:.1f}s : {result.stderr[-300:]}")
+            print(f"[U-ALPHA][GVHMR] ERREUR segment P{pid} {start_s:.1f}s : {result.stderr[-300:]}")
             continue
 
-        pkl_files = list(Path(wham_out).glob("*.pkl"))
+        # GVHMR écrit dans {output_root}/{video_stem}/
+        video_stem = Path(seg_video).stem
+        pkl_dir = Path(gvhmr_out) / video_stem
+        pkl_files = list(pkl_dir.glob("*.pkl")) if pkl_dir.exists() else []
         if not pkl_files:
-            print(f"[U-ALPHA][WHAM] Aucun .pkl dans {wham_out} — segment ignoré")
+            pkl_files = list(Path(gvhmr_out).rglob("*.pkl"))
+        if not pkl_files:
+            print(f"[U-ALPHA][GVHMR] Aucun .pkl dans {gvhmr_out} — segment ignoré")
             continue
 
         frame_offset = int(start_s * src_fps)
 
         for pkl_file in pkl_files:
             with open(pkl_file, "rb") as f:
-                wham_data = pickle.load(f)
+                gvhmr_data = pickle.load(f)
 
-            poses = _extract_wham_poses(wham_data)
-            if poses is None:
-                print(f"  [WARN] Format WHAM inconnu dans {pkl_file.name}")
-                continue
+            # GVHMR peut retourner une liste (1 dict par personne) ou un dict direct
+            entries = gvhmr_data if isinstance(gvhmr_data, list) else [gvhmr_data]
 
-            transl = _extract_wham_transl(wham_data, len(poses))
+            for entry_idx, entry in enumerate(entries):
+                poses = _extract_gvhmr_poses(entry)
+                if poses is None:
+                    print(f"  [WARN] Format GVHMR inconnu dans {pkl_file.name} (entrée {entry_idx})")
+                    continue
 
-            if pid not in all_tracks:
-                all_tracks[pid] = {"poses": {}, "transl": {}}
+                transl = _extract_gvhmr_transl(entry, len(poses))
 
-            for t in range(len(poses)):
-                all_tracks[pid]["poses"][frame_offset + t] = poses[t]
-                all_tracks[pid]["transl"][frame_offset + t] = transl[t]
+                # person_id : pid du segment + suffixe si plusieurs personnes dans le pkl
+                track_id = pid if entry_idx == 0 else f"{pid}_{entry_idx}"
+
+                if track_id not in all_tracks:
+                    all_tracks[track_id] = {
+                        "poses": {},
+                        "transl": {},
+                        "mask_lower_body": mask_lower,
+                    }
+
+                for t in range(len(poses)):
+                    all_tracks[track_id]["poses"][frame_offset + t] = poses[t]
+                    all_tracks[track_id]["transl"][frame_offset + t] = transl[t]
 
         n = len(all_tracks.get(pid, {}).get("poses", {}))
         print(f"  OK — {n} frames accumulées pour P{pid}")
@@ -981,7 +1049,7 @@ def main():
                         choices=["faible", "moyen", "brutal"])
     parser.add_argument("--no-root-motion", action="store_true")
     parser.add_argument("--quality-threshold", type=float, default=0.6)
-    parser.add_argument("--wham-dir", default="~/WHAM")
+    parser.add_argument("--gvhmr-dir", default="~/GVHMR")
     parser.add_argument("--cache-dir", default="",
                         help="Dossier pour cacher les resultats Gemini (evite re-analyse). "
                              "Ex: --cache-dir outputs/gemini_cache")
@@ -1024,25 +1092,25 @@ def main():
         print("[ERREUR] Aucun segment valide après filtrage Gemini.")
         print("  Vérifier que la vidéo contient un humain réel clairement visible.")
         sys.exit(1)
-    print(f"[U-ALPHA] {len(segments)} segment(s) retenu(s) pour WHAM")
+    print(f"[U-ALPHA] {len(segments)} segment(s) retenu(s) pour GVHMR")
 
-    # ── Etape 2 : Extraction WHAM ────────────────────────────────────────────
-    print("\n[U-ALPHA] Etape 2/4 — Extraction WHAM (poses SMPL)...")
+    # ── Etape 2 : Extraction GVHMR ───────────────────────────────────────────
+    print("\n[U-ALPHA] Etape 2/4 — Extraction GVHMR (poses SMPL)...")
     with tempfile.TemporaryDirectory() as tmp_dir:
-        wham_tracks = run_wham(args.input, segments, args.wham_dir, tmp_dir)
+        gvhmr_tracks = run_gvhmr(args.input, segments, args.gvhmr_dir, tmp_dir)
 
-    if not wham_tracks:
-        print("[ERREUR] WHAM n'a produit aucun résultat.")
+    if not gvhmr_tracks:
+        print("[ERREUR] GVHMR n'a produit aucun résultat.")
         sys.exit(1)
 
     os.makedirs(args.output, exist_ok=True)
-    n_persons = len(wham_tracks)
+    n_persons = len(gvhmr_tracks)
     win, poly = SMOOTH_PRESETS[args.smooth]
     print(f"\n[U-ALPHA] Etapes 3-4/4 — SMPL→R15 + Lissage + Export ({n_persons} personne(s))...")
 
     # ── Etapes 3-4 : Retargeting + Lissage + Export ──────────────────────────
-    for pid in sorted(wham_tracks.keys()):
-        track = wham_tracks[pid]
+    for pid in sorted(gvhmr_tracks.keys()):
+        track = gvhmr_tracks[pid]
         poses_dict = track["poses"]
         transl_dict = track["transl"]
 
@@ -1054,6 +1122,10 @@ def main():
 
         # Retargeting SMPL → R15
         rots, root_pos = smpl_to_r15(poses_aa, transl)
+
+        # Masquage joints inférieurs (segments FrankMocap_upper)
+        if track.get("mask_lower_body"):
+            rots = mask_lower_body_joints(rots)
 
         if args.no_root_motion:
             root_pos = np.zeros_like(root_pos)
