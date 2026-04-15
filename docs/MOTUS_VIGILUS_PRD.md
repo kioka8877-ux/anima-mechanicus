@@ -2,21 +2,22 @@
 
 ## I. VISION
 
-| Paramètre | Valeur |
+| Parametre | Valeur |
 |-----------|--------|
-| Objectif | Extraire animations depuis vidéo humain réel → .fbx R15 compatible Roblox |
-| Coût | 0€ (Colab gratuit + open-source + APIs gratuites) |
-| Statut | V3 — Option C : Gemini + WHAM + SMPL→R15 |
-| Ancien nom | MOTUS-VIGILUS (abandonné — MediaPipe incompatible vidéos réelles) |
+| Objectif | Extraire animations depuis video humain reel → .fbx R15 compatible Roblox |
+| Cout | 0€ (Colab gratuit + open-source + APIs gratuites) |
+| Statut | V4 — Option D : Gemini + GVHMR + SMPL→R15 |
+| Ancien nom | MOTUS-VIGILUS (abandonne — MediaPipe incompatible videos reelles) |
+| Version precedente | V3 — WHAM (abandonne — dependances mmcv/detectron2 incompatibles Colab 2026) |
 
 ---
 
 ## II. ARCHITECTURE DES 2 FREGATES
 
-| Frégate | Script | Input | Output | Stack |
+| Fregate | Script | Input | Output | Stack |
 |---------|--------|-------|--------|-------|
-| U-ALPHA (L'Auspex Cogitateur) | motus_extract.py | .mp4 | .npz | Gemini 2.0 Flash, WHAM, NumPy, SciPy |
-| U-GAMMA (La Forge) | motus_forge.py | .npz + .blend | .fbx | Blender 4.x headless |
+| U-ALPHA (L'Auspex Cogitateur) | motus_extract.py | .mp4 | .npz | Gemini 2.0 Flash, GVHMR, NumPy, SciPy |
+| U-GAMMA (La Forge) | motus_forge.py | .npz | .fbx | Blender 4.x headless |
 
 ---
 
@@ -24,34 +25,42 @@
 
 ### Etape 1 — Analyse Gemini
 
-Gemini 2.0 Flash reçoit la vidéo entière et produit un JSON structuré :
+Gemini 2.0 Flash recoit la video entiere et produit un JSON structure :
 
 ```
-Vidéo .mp4
+Video .mp4
     → Gemini 2.0 Flash (API)
     → JSON : segments_valides[], segments_exclus[], camera, qualite_globale
 ```
 
-Critères de filtrage automatique des segments :
+Criteres de filtrage automatique des segments :
 - `qualite_estimee < 0.6` → exclu
-- `corps_visible != "complet"` → warning ou exclu selon niveau
+- `corps_visible = "tete_seulement"` → modele_recommande = DECA → segment skippe
+- `corps_visible = "partiel"` → modele_recommande = FrankMocap_upper → GVHMR + masquage joints inferieurs
 - `camera.zoom_detecte = true` → warning root motion
 
-### Etape 2 — Extraction WHAM
+### Etape 2 — Extraction GVHMR
 
-WHAM (CVPR 2024) traite chaque segment validé :
+GVHMR (SIGGRAPH Asia 2024) traite chaque segment valide :
 
 ```
-Segment .mp4 découpé
-    → WHAM inference
+Segment .mp4 decoupe
+    → GVHMR inference (tools/demo/demo.py)
     → poses : (N_frames, 24, 3)   axis-angle SMPL
-    → transl : (N_frames, 3)      translation monde
+    → transl : (N_frames, 3)      translation monde (gravity-view coordinates)
 ```
 
-Caractéristiques clés :
-- Coordonnées MONDE (pas caméra) — root motion réel sans foot sliding
-- Vitesse >200 FPS sur T4
-- Multi-personnes : 1 passe WHAM par person_id
+Caracteristiques cles :
+- Coordonnees MONDE avec repere gravite-vue — root motion reel superieur a WHAM
+- Detection personnes : YOLOv8 (ultralytics)
+- Pose 2D : ViTPose-H
+- HMR backbone : HMR2.0a
+- Multi-personnes : 1 passe GVHMR par person_id
+
+Cas corps partiel (modele_recommande = FrankMocap_upper) :
+- GVHMR tourne normalement
+- Post-traitement : joints inferieurs non visibles mis a quaternion identite [1,0,0,0]
+- Joints masques : LeftUpperLeg, LeftLowerLeg, LeftFoot, RightUpperLeg, RightLowerLeg, RightFoot
 
 ### Etape 3 — Retargeting SMPL→R15
 
@@ -60,7 +69,7 @@ Mapping fixe des 24 joints SMPL vers les 15 os R15 :
 | SMPL joint | R15 os |
 |-----------|--------|
 | Pelvis (0) | LowerTorso |
-| Spine2 (6) | UpperTorso |
+| Spine3 (9) | UpperTorso |
 | Head (15) | Head |
 | L_Shoulder (16) | LeftUpperArm |
 | L_Elbow (18) | LeftLowerArm |
@@ -75,21 +84,23 @@ Mapping fixe des 24 joints SMPL vers les 15 os R15 :
 | R_Knee (5) | RightLowerLeg |
 | R_Ankle (8) | RightFoot |
 
+Note : le code utilise Spine3 (index 9) → UpperTorso. Le PRD precedent indiquait Spine2 (6), le code fait foi.
+
 Conversion : axis-angle → rotation matrix → quaternion WXYZ
 Application convention axes Roblox : X_roblox = -X_SMPL, Z_roblox = -Z_SMPL
 
 ### Etape 4 — Lissage + Interpolation FPS
 
 - Lissage Savitzky-Golay (scipy) — 3 niveaux : faible / moyen / fort
-- Renforcement sur extrémités (mains, pieds, avant-bras)
+- Renforcement sur extremites (mains, pieds, avant-bras)
 - Resampling temporel vers FPS cible (30 / 60 / 120)
-- Interpolation linéaire des gaps d'occlusion (max 10 frames)
+- Interpolation lineaire des gaps d'occlusion (max 10 frames)
 
 ---
 
 ## IV. CONTRAT .npz (Interface U-ALPHA → U-GAMMA)
 
-```python
+```
 {
     "rotations":     np.float32,  # (N_frames, 15, 4)  quaternions WXYZ
     "root_position": np.float32,  # (N_frames, 3)      XYZ metres
@@ -103,13 +114,11 @@ Application convention axes Roblox : X_roblox = -X_SMPL, Z_roblox = -Z_SMPL
 ```
 
 Ordre des 15 os (immuable) :
-```
 LowerTorso, UpperTorso, Head,
 LeftUpperArm, LeftLowerArm, LeftHand,
 RightUpperArm, RightLowerArm, RightHand,
 LeftUpperLeg, LeftLowerLeg, LeftFoot,
 RightUpperLeg, RightLowerLeg, RightFoot
-```
 
 ---
 
@@ -132,6 +141,7 @@ RightUpperLeg, RightLowerLeg, RightFoot
           "distance_camera": "proche|moyen|lointain",
           "type_mouvement": "marche|danse|combat|sport|statique",
           "qualite_estimee": float,
+          "modele_recommande": "WHAM|FrankMocap_upper|DECA|skip",
           "problemes": []
         }
       ],
@@ -153,40 +163,46 @@ RightUpperLeg, RightLowerLeg, RightFoot
 }
 ```
 
+Note : le champ `modele_recommande` peut valoir `WHAM` (legacy) — traite identiquement a `GVHMR` depuis V4.
+
 ---
 
 ## VI. STACK TECHNIQUE
 
 | Composant | Version | Usage |
 |-----------|---------|-------|
-| Python | 3.10+ | Orchestration |
-| Gemini | 2.0 Flash | Analyse vidéo intelligente |
-| WHAM | CVPR 2024 | Estimation pose SMPL monde |
-| NumPy | Latest | Calcul quaternions, axes |
+| Python | 3.10 | Orchestration |
+| Gemini | 2.0 Flash | Analyse video intelligente |
+| GVHMR | SIGGRAPH Asia 2024 | Estimation pose SMPL monde (remplace WHAM) |
+| YOLOv8 | ultralytics 8.2.42 | Detection personnes (interne GVHMR) |
+| ViTPose-H | multi-coco | Pose 2D (interne GVHMR) |
+| HMR2.0a | epoch=10-step=25000 | Regression mesh SMPL (interne GVHMR) |
+| NumPy | 1.23.5 (GVHMR pin) | Calcul quaternions, axes |
 | SciPy | Latest | Smoothing Savitzky-Golay + interpolation |
-| OpenCV | Latest | Décodage vidéo, découpe segments |
+| OpenCV | Latest | Decodage video, decoupe segments |
 | Blender | 4.0+ | Export FBX headless (U-GAMMA) |
-| Google Colab | T4 GPU | Exécution cloud |
+| Google Colab | T4 GPU | Execution cloud |
 
 ---
 
 ## VII. CONTRAINTES
 
-- Input : vidéo d'un humain réel uniquement (pas d'avatar 3D, pas d'animation)
-- Durée max : 60 secondes de vidéo source
-- Personnages : max 4 sujets simultanés
-- Etanchéité : U-ALPHA ignore Blender. U-GAMMA ignore Gemini/WHAM.
-- Clé Gemini : gratuite sur aistudio.google.com (1M tokens/jour)
-- Modèles SMPL : inscription gratuite requise sur mpg.de
+- Input : video d'un humain reel uniquement (pas d'avatar 3D, pas d'animation)
+- Duree max : 60 secondes de video source
+- Personnages : max 4 sujets simultanees
+- Etancheite : U-ALPHA ignore Blender. U-GAMMA ignore Gemini/GVHMR.
+- Cle Gemini : gratuite sur aistudio.google.com (1M tokens/jour)
+- Modeles SMPL/SMPLX : disponibles sur HuggingFace (camenduru) sans inscription
 
 ---
 
 ## VIII. METRIQUES DE SUCCES
 
-| Métrique | Cible |
+| Metrique | Cible |
 |----------|-------|
-| Temps traitement (1 min vidéo) | < 15 min (Colab T4) |
-| Qualité animation | Pas de joint popping, root motion cohérent |
-| Filtrage Gemini | 0 segment dégradé envoyé à WHAM |
-| Code source U-ALPHA | < 600 lignes |
-| Coût récurrent | 0€ |
+| Temps traitement (1 min video) | < 15 min (Colab T4) |
+| Qualite animation | Pas de joint popping, root motion coherent |
+| Filtrage Gemini | 0 segment degrade envoye a GVHMR |
+| Code source U-ALPHA | < 700 lignes |
+| Cout recurrent | 0€ |
+| Installation Colab | Reussit du premier coup sans erreur |
