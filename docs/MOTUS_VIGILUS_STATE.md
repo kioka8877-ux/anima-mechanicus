@@ -2,59 +2,61 @@
 
 | Champ | Valeur |
 |-------|--------|
-| STATUS | Phase 5 — En cours (Validation imperiale) |
+| STATUS | Phase 6 — En cours (Migration GVHMR) |
 | DATE | Avril 2026 |
 | ARCHITECTURE | 2 Fregates (U-ALPHA + U-GAMMA) |
-| VERSION | V3 — Option C : Gemini 2.0 Flash + WHAM + SMPL→R15 |
+| VERSION | V4 — Option D : Gemini + GVHMR + SMPL→R15 |
 | CONTRAT .npz | Inchange : rotations (N,15,4) + root_position (N,3) + metadata |
-| CONTRAT JSON GEMINI | Defini et documente dans README |
+| CONTRAT JSON GEMINI | Inchange — defini et documente dans README |
 
 ---
 
 ## [LAST_WORK]
 
-- Projet renomme ANIMA-MECHANICUS (WH40K lore)
-- Architecture pivot : MediaPipe abandonne → Gemini 2.0 Flash + WHAM + SMPL→R15
-- motus_extract.py v2 : COMPLETE — pipeline Gemini + WHAM + SMPL→R15
-- ANIMA_MECHANICUS_ALPHA.ipynb : COMPLETE — notebook Colab 7 cellules
-- motus_forge.py v4 : COMPLETE — rig R15 genere programmatiquement (plus de r15_template.blend)
-- ANIMA_MECHANICUS_GAMMA.ipynb : COMPLETE — notebook Colab 4 cellules, sans template
-- Toutes les dependances externes eliminees (pipeline 100% autonome)
+### Decision de migration : WHAM → GVHMR (Avril 2026)
 
-### 5 fixes dependances appliques (Avril 2026)
+Phase 5 (Validation imperiale) a revele que WHAM est impossible a installer sur Colab T4 actuel :
+- `mmcv-full 1.3.9` : echec de build systematique (subprocess-exited-with-error)
+- `detectron2` : wheel torch2.10 indisponible, compilation source echoue
+- `ViTPose` : 2.4 GB de poids, dependant de mmcv
 
-| Fix | Detail |
-|-----|--------|
-| numpy 1.24.4 | Version pinnée dans requirements.txt — compatibilite garantie torch/scipy/WHAM |
-| mmcv 2.0.1 | Migration mmcv 1.3.9 → 2.0.1 — API unifiee, compatible Colab T4 |
-| Checkpoints WHAM | Chemins verifies et documentes dans ALPHA Cellule 1 |
-| r15_template.blend | Fichier supprime — rig R15 genere 100% programmatiquement depuis v4 |
-| requirements.txt | Versions pinees pour toutes les dependances critiques |
+**Solution retenue : GVHMR (SIGGRAPH Asia 2024)**
+- Notebook Colab officiel confirme fonctionnel sur Tesla T4
+- Zero mmcv, zero detectron2
+- Detection via YOLO (deja present dans le projet)
+- Poids sur HuggingFace (telechargement automatique via aria2c)
+- Installation : 2 commandes pip uniquement
+- Sortie : parametres SMPL world coordinates — meme format que WHAM
+- `smpl_to_r15()` dans motus_extract.py : INCHANGE
 
-Fichiers impactes : `ANIMA_MECHANICUS_ALPHA.ipynb` (Cellule 1), `requirements.txt`, README.md
-Fichiers non impactes : `motus_extract.py`, `motus_forge.py`, `ANIMA_MECHANICUS_GAMMA.ipynb`
+### Travaux anterieurs (toujours valides)
+- motus_extract.py v2 : pipeline Gemini + SMPL→R15 — CONSERVE, seul run_wham() a remplacer
+- ANIMA_MECHANICUS_ALPHA.ipynb : Cellule 1 (installation) a refaire, reste intact
+- motus_forge.py v4 : INTACT — non impacte par la migration
+- ANIMA_MECHANICUS_GAMMA.ipynb : INTACT — non impacte
 
 ---
 
 ## [NEXT_TASK]
 
-Phase 5 — Validation imperiale :
+Phase 6 — Migration GVHMR :
 
-1. Ouvrir ANIMA_MECHANICUS_ALPHA.ipynb sur Colab T4
-2. Test "Danse" — 1 personne, corps complet face camera
-3. Verifier les .npz exportes (shapes, valeurs)
-4. Ouvrir ANIMA_MECHANICUS_GAMMA.ipynb
-5. Forger les .fbx
-6. Importer dans Roblox Studio — valider que l'animation joue correctement
+1. Remplacer `run_wham()` par `run_gvhmr()` dans motus_extract.py
+2. Adapter la lecture de sortie GVHMR (format pkl/npz GVHMR vs WHAM)
+3. Implementer le cas `FrankMocap_upper` : masquage joints inferieurs quand Gemini detecte tronc seulement
+4. Refaire Cellule 1 de ANIMA_MECHANICUS_ALPHA.ipynb (installation GVHMR)
+5. Mettre a jour les checkpoints telecharges (GVHMR vs WHAM)
+6. Re-valider Phase 5 avec la nouvelle stack
 
 ---
 
 ## [BLOCKERS]
 
-- Modeles SMPL (body_models/) necessitent inscription gratuite sur mpg.de
-  → Procedure documentee dans ANIMA_MECHANICUS_ALPHA.ipynb Cellule 1
-- WHAM necessite ffmpeg + torch + detectron2 + mmcv sur Colab T4
-  → Cellule d'installation complete dans ANIMA_MECHANICUS_ALPHA.ipynb
+- Modeles SMPL/SMPL-X necessitent inscription gratuite
+  - SMPL_NEUTRAL.pkl → disponible sur HuggingFace (camenduru/SMPLer-X) sans inscription
+  - SMPLX_NEUTRAL.npz → disponible sur HuggingFace (camenduru/GVHMR) sans inscription
+  - NOTE : le notebook GVHMR officiel telecharge tout via aria2c depuis HuggingFace automatiquement
+- `FrankMocap_upper` non implemente → migration est l'occasion de l'implementer proprement
 
 ---
 
@@ -62,14 +64,13 @@ Phase 5 — Validation imperiale :
 
 | Probleme | Solution |
 |----------|---------|
+| WHAM mmcv/detectron2 echec Colab | Migration vers GVHMR (zero mmcv/detectron2) |
 | Camera agitee → root motion fausse | Warning Gemini `camera.mouvement = agitee` + option desactivation root_position |
-| Corps partiel → hallucination WHAM | Filtre Gemini `qualite_estimee < 0.6` → segment exclu automatiquement |
+| Corps partiel → hallucination modele | Filtre Gemini `qualite_estimee < 0.6` → exclu + masquage joints inferieurs si `FrankMocap_upper` |
 | Occlusions courtes (<10 frames) | Interpolation lineaire scipy interp1d |
-| SMPL 24 joints → R15 15 os | Mapping fixe dans motus_extract.py |
+| SMPL 24 joints → R15 15 os | Mapping fixe dans motus_extract.py (INCHANGE) |
 | r15_template.blend manquant | Rig R15 genere programmatiquement dans motus_forge.py v4 |
-| Blender headless lent | Template supprime → demarrage plus rapide |
-| mmcv conflit de version | Migration 1.3.9 → 2.0.1 — API unifiee et stable |
-| numpy incompatibilite | Version pinnée 1.24.4 — compatible torch + scipy + WHAM |
+| SMPL body models sans inscription | Disponibles sur HuggingFace via aria2c (notebook GVHMR officiel) |
 
 ---
 
@@ -79,4 +80,19 @@ Phase 5 — Validation imperiale :
 |---------|-------------|--------|
 | V1 | 3 Fregates + BVH | Abandonne |
 | V2 | 2 Fregates + MediaPipe | Echoue (videos Roblox 3D incompatibles) |
-| V3 | 2 Fregates + Gemini + WHAM | Phase 5 — Validation |
+| V3 | 2 Fregates + Gemini + WHAM | Bloque — WHAM impossible sur Colab T4 actuel |
+| V4 | 2 Fregates + Gemini + GVHMR | Phase 6 — Migration en cours |
+
+---
+
+## [REFERENCE GVHMR]
+
+| Element | Detail |
+|---------|--------|
+| Repo | https://github.com/zju3dv/GVHMR |
+| Notebook Colab officiel | https://colab.research.google.com/drive/1N9WSchizHv2bfQqkE9Wuiegw_OT7mtGj |
+| Publication | SIGGRAPH Asia 2024 |
+| Detection | YOLOv8 (ultralytics) |
+| Pose 2D | ViTPose-H |
+| Poids | HuggingFace (camenduru/GVHMR) |
+| CUDA requis | 12.1 (cu121) — compatible Colab T4 |
