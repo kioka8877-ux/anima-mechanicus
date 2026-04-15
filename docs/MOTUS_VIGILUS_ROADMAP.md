@@ -23,7 +23,7 @@
 - [x] Filtre automatique segments (qualite < 0.6 → exclu)
 - [x] Affichage rapport utilisateur dans le notebook
 
-### 2.2 Module WHAM
+### 2.2 Module WHAM (remplace par GVHMR en Phase 6)
 - [x] Installation WHAM sur Colab (torch, detectron2, mmcv, ffmpeg)
 - [x] Decoupe video par segments valides (OpenCV)
 - [x] Appel WHAM inference par segment + par personne
@@ -70,7 +70,10 @@
 
 ---
 
-## PHASE 5 : VALIDATION IMPERIALE [EN COURS]
+## PHASE 5 : VALIDATION IMPERIALE [BLOQUEE — en attente Phase 6]
+
+Bloquee par echec installation WHAM sur Colab T4 (mmcv + detectron2 incompatibles).
+Sera re-executee integralement apres migration GVHMR.
 
 - [ ] Test "Danse" — 1 personne, corps complet face camera
 - [ ] Verifier rapport Gemini : segments detectes correctement
@@ -84,9 +87,39 @@
 
 ---
 
+## PHASE 6 : MIGRATION GVHMR [EN COURS]
+
+**Raison** : WHAM bloque par dependances mmcv/detectron2 sur Colab T4 actuel.
+**GVHMR** (SIGGRAPH Asia 2024) confirme fonctionnel sur T4 via notebook officiel.
+**Impact code** : seul `run_wham()` dans motus_extract.py est a remplacer. Tout le reste est intact.
+
+### 6.1 motus_extract.py — Module extraction
+- [ ] Remplacer `run_wham()` par `run_gvhmr()` (appel subprocess demo.py GVHMR)
+- [ ] Adapter lecture sortie GVHMR → meme format passes/transl que WHAM
+- [ ] Implementer cas `FrankMocap_upper` : masquage joints inferieurs (LeftUpperLeg, LeftLowerLeg, LeftFoot, RightUpperLeg, RightLowerLeg, RightFoot → quaternion identite)
+- [ ] Supprimer references WHAM/mmcv/detectron2
+
+### 6.2 ANIMA_MECHANICUS_ALPHA.ipynb — Cellule 1 uniquement
+- [ ] Refaire Cellule 1 installation : GVHMR (git clone + pip install -r requirements.txt + pip install -e .)
+- [ ] Adapter telechargement checkpoints : aria2c depuis HuggingFace (camenduru/GVHMR)
+- [ ] Supprimer installation mmcv/detectron2/WHAM
+- [ ] Cellules 2 a 7 : INCHANGEES
+
+### 6.3 Documentation
+- [x] STATE.md mis a jour (V4 — GVHMR)
+- [x] ROADMAP.md mis a jour
+- [ ] PRD.md mis a jour (stack technique, pipeline step 2)
+- [ ] README.md mis a jour
+
+### 6.4 Re-validation (Phase 5 bis)
+- [ ] Re-executer tous les tests de Phase 5 avec GVHMR
+
+---
+
 ## NOTES D'ABANDON
 
 | Version | Raison de l'abandon |
 |---------|---------------------|
 | V1 — 3 Fregates + BVH | Sur-ingenierie, format BVH inutile pour Roblox |
 | V2 — MediaPipe | MediaPipe entraine sur humains reels : echoue totalement sur avatars Roblox 3D |
+| V3 — WHAM | mmcv 1.3.9 + detectron2 impossibles a installer sur Colab T4 actuel (2026) |
