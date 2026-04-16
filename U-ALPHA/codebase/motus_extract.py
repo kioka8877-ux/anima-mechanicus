@@ -1146,7 +1146,9 @@ def _patch_gvhmr_vis_imports(gvhmr_dir: Path) -> None:
     Idempotent — detecte si le patch est deja applique.
     """
     def _wrap_imports(filepath: Path, patterns: list) -> bool:
-        """Entoure chaque ligne matchant un pattern de try/except. Retourne True si modifie."""
+        """Entoure chaque import matchant un pattern de try/except.
+        Gere les imports multi-lignes (parentheses ouvertes) pour eviter les SyntaxError.
+        Retourne True si modifie."""
         if not filepath.exists():
             return False
         src = filepath.read_text()
@@ -1155,18 +1157,35 @@ def _patch_gvhmr_vis_imports(gvhmr_dir: Path) -> None:
         lines = src.splitlines()
         new_lines = ["# _PATCHED_BY_ANIMA"]
         changed = False
-        for line in lines:
+        i = 0
+        while i < len(lines):
+            line = lines[i]
             stripped = line.lstrip()
             matched = any(stripped.startswith(p) for p in patterns)
             if matched:
                 indent = line[: len(line) - len(stripped)]
+                # Collecter le bloc complet si import entre parentheses (multi-ligne)
+                block_lines = [stripped]
+                paren_depth = stripped.count("(") - stripped.count(")")
+                j = i + 1
+                while paren_depth > 0 and j < len(lines):
+                    cont = lines[j]
+                    paren_depth += cont.count("(") - cont.count(")")
+                    block_lines.append(cont)
+                    j += 1
+                # Wrapper tout le bloc dans un try/except
                 new_lines.append(f"{indent}try:")
-                new_lines.append(f"{indent}    {stripped}")
+                new_lines.append(f"{indent}    {block_lines[0]}")
+                for cont_line in block_lines[1:]:
+                    # Conserver l'indentation relative des lignes de continuation
+                    new_lines.append(f"    {cont_line}" if cont_line.strip() else cont_line)
                 new_lines.append(f"{indent}except (ImportError, Exception):")
                 new_lines.append(f"{indent}    pass")
                 changed = True
+                i = j  # sauter les lignes de continuation deja consommees
             else:
                 new_lines.append(line)
+                i += 1
         if changed:
             filepath.write_text("\n".join(new_lines))
         return changed
