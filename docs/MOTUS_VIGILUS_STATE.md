@@ -2,7 +2,7 @@
 
 | Champ | Valeur |
 |-------|--------|
-| STATUS | Phase 6 — En cours (Migration GVHMR) |
+| STATUS | Phase 6 — Code termine, re-validation Colab en attente |
 | DATE | Avril 2026 |
 | ARCHITECTURE | 2 Fregates (U-ALPHA + U-GAMMA) |
 | VERSION | V4 — Option D : Gemini + GVHMR + SMPL→R15 |
@@ -13,50 +13,52 @@
 
 ## [LAST_WORK]
 
-### Decision de migration : WHAM → GVHMR (Avril 2026)
+### Phase 6 complete (code) — Avril 2026
 
-Phase 5 (Validation imperiale) a revele que WHAM est impossible a installer sur Colab T4 actuel :
-- `mmcv-full 1.3.9` : echec de build systematique (subprocess-exited-with-error)
-- `detectron2` : wheel torch2.10 indisponible, compilation source echoue
-- `ViTPose` : 2.4 GB de poids, dependant de mmcv
+**6.1 motus_extract.py — DONE**
+- `run_wham()` remplace par `run_gvhmr()` (appel subprocess demo.py GVHMR)
+- Lecture sortie GVHMR adaptee (format pkl/npz → meme contrat passes/transl)
+- Cas `FrankMocap_upper` implemente : masquage joints inferieurs (LeftUpperLeg, LeftLowerLeg, LeftFoot, RightUpperLeg, RightLowerLeg, RightFoot → quaternion identite)
+- References WHAM/mmcv/detectron2 supprimees
+- Routing automatique selon `modele_recommande` Gemini : GVHMR / FrankMocap_upper / DECA / skip
 
-**Solution retenue : GVHMR (SIGGRAPH Asia 2024)**
-- Notebook Colab officiel confirme fonctionnel sur Tesla T4
-- Zero mmcv, zero detectron2
-- Detection via YOLO (deja present dans le projet)
-- Poids sur HuggingFace (telechargement automatique via aria2c)
-- Installation : 2 commandes pip uniquement
-- Sortie : parametres SMPL world coordinates — meme format que WHAM
-- `smpl_to_r15()` dans motus_extract.py : INCHANGE
+**6.2 ANIMA_MECHANICUS_ALPHA.ipynb — DONE**
+- Cellule 1 refaite : GVHMR via git clone + pip + aria2c HuggingFace (camenduru/GVHMR)
+- Installation mmcv/detectron2/WHAM supprimee
+- Cellules 2 a 7 : INCHANGEES
 
-### Travaux anterieurs (toujours valides)
-- motus_extract.py v2 : pipeline Gemini + SMPL→R15 — CONSERVE, seul run_wham() a remplacer
-- ANIMA_MECHANICUS_ALPHA.ipynb : Cellule 1 (installation) a refaire, reste intact
-- motus_forge.py v4 : INTACT — non impacte par la migration
-- ANIMA_MECHANICUS_GAMMA.ipynb : INTACT — non impacte
+**6.3 Documentation — DONE (README + STATE + ROADMAP)**
+- README mis a jour : GVHMR, stack YOLOv8/ViTPose-H/HMR2.0a, routing Gemini, historique V1→V4
+- PRD reste a mettre a jour (stack technique step 2)
+
+### Contexte migration (conserve pour reference)
+- WHAM bloque : mmcv-full 1.3.9 echec build, detectron2 wheel torch2.10 indisponible
+- GVHMR (SIGGRAPH Asia 2024) : zero mmcv, zero detectron2, poids HuggingFace via aria2c
+- `smpl_to_r15()`, motus_forge.py v4, U-GAMMA : INCHANGES
 
 ---
 
 ## [NEXT_TASK]
 
-Phase 6 — Migration GVHMR :
+Phase 6.4 — Re-validation sur Colab T4 reel :
 
-1. Remplacer `run_wham()` par `run_gvhmr()` dans motus_extract.py
-2. Adapter la lecture de sortie GVHMR (format pkl/npz GVHMR vs WHAM)
-3. Implementer le cas `FrankMocap_upper` : masquage joints inferieurs quand Gemini detecte tronc seulement
-4. Refaire Cellule 1 de ANIMA_MECHANICUS_ALPHA.ipynb (installation GVHMR)
-5. Mettre a jour les checkpoints telecharges (GVHMR vs WHAM)
-6. Re-valider Phase 5 avec la nouvelle stack
+1. Ouvrir `ANIMA_MECHANICUS_ALPHA.ipynb` sur Google Colab (GPU T4)
+2. Executer Cellule 1 : verifier installation GVHMR sans erreur
+3. Re-executer tous les tests de Phase 5 avec la nouvelle stack GVHMR :
+   - Test "Danse" — 1 personne, corps complet
+   - Test "Combat" — 2 personnes, occlusions
+   - Test "Camera instable" — warning root motion
+4. Valider .npz : shapes (N,15,4), (N,3), pas de NaN
+5. Valider .fbx forge sans erreur Blender + import Roblox Studio
+6. Mettre a jour PRD.md (stack technique pipeline step 2) — derniere doc en attente
 
 ---
 
 ## [BLOCKERS]
 
-- Modeles SMPL/SMPL-X necessitent inscription gratuite
-  - SMPL_NEUTRAL.pkl → disponible sur HuggingFace (camenduru/SMPLer-X) sans inscription
-  - SMPLX_NEUTRAL.npz → disponible sur HuggingFace (camenduru/GVHMR) sans inscription
-  - NOTE : le notebook GVHMR officiel telecharge tout via aria2c depuis HuggingFace automatiquement
-- `FrankMocap_upper` non implemente → migration est l'occasion de l'implementer proprement
+- Aucun blocker actif sur le code
+- Re-validation Phase 6.4 requiert session Colab T4 avec GPU disponible
+- Modeles SMPL/SMPL-X : disponibles sur HuggingFace sans inscription (telecharges automatiquement via aria2c au runtime)
 
 ---
 
@@ -81,7 +83,7 @@ Phase 6 — Migration GVHMR :
 | V1 | 3 Fregates + BVH | Abandonne |
 | V2 | 2 Fregates + MediaPipe | Echoue (videos Roblox 3D incompatibles) |
 | V3 | 2 Fregates + Gemini + WHAM | Bloque — WHAM impossible sur Colab T4 actuel |
-| V4 | 2 Fregates + Gemini + GVHMR | Phase 6 — Migration en cours |
+| V4 | 2 Fregates + Gemini + GVHMR | Phase 6 — Code termine, re-validation en attente |
 
 ---
 
