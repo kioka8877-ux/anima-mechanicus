@@ -803,6 +803,116 @@ def mask_lower_body_joints(rots: np.ndarray) -> np.ndarray:
     return result
 
 
+def _ensure_pytorch3d_shim() -> str:
+    """
+    Cree un shim pytorch3d minimal (pur PyTorch, zero compilation) si le
+    module n'est pas installe dans l'environnement.
+    Retourne le chemin du dossier parent a ajouter au PYTHONPATH du subprocess.
+    Compatible Python 3.12 / Colab 2026 — independant de pip install.
+    """
+    shim_parent   = "/tmp/pytorch3d_shim"
+    shim_pkg      = os.path.join(shim_parent, "pytorch3d")
+    shim_xforms   = os.path.join(shim_pkg, "transforms")
+    marker        = os.path.join(shim_xforms, "__init__.py")
+
+    if os.path.exists(marker):
+        return shim_parent
+
+    for d in (shim_xforms,
+              os.path.join(shim_pkg, "structures"),
+              os.path.join(shim_pkg, "renderer")):
+        os.makedirs(d, exist_ok=True)
+
+    with open(os.path.join(shim_pkg, "__init__.py"), "w") as _f:
+        _f.write("# pytorch3d minimal shim — ANIMA-MECHANICUS\n")
+    for sub in ("structures", "renderer"):
+        open(os.path.join(shim_pkg, sub, "__init__.py"), "w").close()
+
+    _code = '''\
+import torch
+import torch.nn.functional as F
+
+def quaternion_to_matrix(q):
+    r, i, j, k = torch.unbind(q, -1)
+    s = 2.0 / (q * q).sum(-1)
+    o = torch.stack([
+        1 - s*(j*j + k*k), s*(i*j - k*r),     s*(i*k + j*r),
+        s*(i*j + k*r),     1 - s*(i*i + k*k), s*(j*k - i*r),
+        s*(i*k - j*r),     s*(j*k + i*r),     1 - s*(i*i + j*j),
+    ], -1)
+    return o.reshape(q.shape[:-1] + (3, 3))
+
+def _sqrt_pos(x):
+    return torch.where(x > 0, torch.sqrt(torch.clamp(x, min=0)), torch.zeros_like(x))
+
+def matrix_to_quaternion(m):
+    b = m.shape[:-2]
+    m00,m01,m02,m10,m11,m12,m20,m21,m22 = torch.unbind(m.reshape(b + (9,)), -1)
+    q = _sqrt_pos(torch.stack([
+        1+m00+m11+m22, 1+m00-m11-m22,
+        1-m00+m11-m22, 1-m00-m11+m22,
+    ], -1) / 4.0)
+    w, x, y, z = torch.unbind(q, -1)
+    r = torch.stack([w, torch.copysign(x, m21-m12),
+                     torch.copysign(y, m02-m20),
+                     torch.copysign(z, m10-m01)], -1)
+    return r / r.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+
+def axis_angle_to_quaternion(aa):
+    ang = torch.norm(aa, p=2, dim=-1, keepdim=True).clamp(min=1e-6)
+    h = ang * 0.5
+    s = torch.where(ang < 1e-6, 0.5 - (ang*ang)/48, torch.sin(h)/ang)
+    return torch.cat([torch.cos(h), aa * s], -1)
+
+def axis_angle_to_matrix(aa):
+    return quaternion_to_matrix(axis_angle_to_quaternion(aa))
+
+def quaternion_to_axis_angle(q):
+    n = torch.norm(q[..., 1:], p=2, dim=-1, keepdim=True)
+    h = torch.atan2(n, q[..., :1])
+    ang = 2 * h
+    s = torch.where(ang < 1e-6, 0.5 - (ang*ang)/48, torch.sin(h)/ang)
+    return q[..., 1:] / s.clamp(min=1e-8)
+
+def matrix_to_axis_angle(m):
+    return quaternion_to_axis_angle(matrix_to_quaternion(m))
+
+def rotation_6d_to_matrix(d6):
+    a1, a2 = d6[..., :3], d6[..., 3:]
+    b1 = F.normalize(a1, dim=-1)
+    b2 = F.normalize(a2 - (b1 * a2).sum(-1, keepdim=True) * b1, dim=-1)
+    b3 = torch.linalg.cross(b1, b2)
+    return torch.stack((b1, b2, b3), dim=-2)
+
+def matrix_to_rotation_6d(m):
+    return m[..., :2, :].clone().reshape(m.shape[:-2] + (6,))
+
+def standardize_quaternion(q):
+    return torch.where(q[..., 0:1] < 0, -q, q)
+
+def quaternion_raw_multiply(a, b):
+    aw, ax, ay, az = torch.unbind(a, -1)
+    bw, bx, by, bz = torch.unbind(b, -1)
+    return torch.stack([
+        aw*bw - ax*bx - ay*by - az*bz,
+        aw*bx + ax*bw + ay*bz - az*by,
+        aw*by - ax*bz + ay*bw + az*bx,
+        aw*bz + ax*by - ay*bx + az*bw,
+    ], -1)
+
+def quaternion_multiply(a, b):
+    return standardize_quaternion(quaternion_raw_multiply(a, b))
+
+def quaternion_invert(q):
+    s = torch.tensor([1, -1, -1, -1], dtype=q.dtype, device=q.device)
+    return q * s
+'''
+    with open(marker, "w") as _f:
+        _f.write(_code)
+
+    return shim_parent
+
+
 def run_gvhmr(video_path: str, segments: list, gvhmr_dir: str, tmp_dir: str) -> dict:
     """
     Appelle GVHMR sur chaque segment validé et retourne les poses SMPL.
@@ -844,15 +954,14 @@ def run_gvhmr(video_path: str, segments: list, gvhmr_dir: str, tmp_dir: str) -> 
         gvhmr_out = os.path.join(tmp_dir, f"gvhmr_P{pid}_{int(start_s*10):06d}")
         os.makedirs(gvhmr_out, exist_ok=True)
 
-        # PYTHONPATH garantit que hmr4d est importable depuis le repo clone
-        # On lance demo.py comme script direct (pas via exec) pour que
-        # __file__, sys.argv[0] et argparse fonctionnent correctement.
-        # /tmp/pytorch3d_shim est inclus en fallback si pip install a echoue
-        # silencieusement (Python 3.12 / pip 24+ sans pyproject.toml)
+        # PYTHONPATH garantit que hmr4d ET pytorch3d sont importables.
+        # _ensure_pytorch3d_shim() cree le shim a la volee si pytorch3d
+        # n'est pas installe (Python 3.12 / pip 24+ Colab 2026).
+        _shim_path = _ensure_pytorch3d_shim()
         _env = os.environ.copy()
         _env["PYTHONPATH"] = (
             str(gvhmr_dir) + os.pathsep
-            + "/tmp/pytorch3d_shim" + os.pathsep
+            + _shim_path + os.pathsep
             + _env.get("PYTHONPATH", "")
         )
 
