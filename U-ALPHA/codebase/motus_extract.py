@@ -970,6 +970,132 @@ def look_at_rotation(camera_position, at=None, up=None, device="cpu"):
     return shim_parent
 
 
+def _setup_gvhmr_pytorch3d(gvhmr_dir: Path) -> None:
+    """
+    Cree un stub pytorch3d complet directement dans gvhmr_dir/pytorch3d/.
+    Ce dossier est le 1er element de PYTHONPATH lors du subprocess GVHMR,
+    donc le stub est toujours trouve en priorite, sans dependance sur /tmp.
+    Idempotent : ne recree que si structures/meshes.py est absent.
+    """
+    base = gvhmr_dir / "pytorch3d"
+    marker = base / "structures" / "meshes.py"
+    if marker.exists():
+        return
+
+    for d in (base / "transforms", base / "structures", base / "renderer"):
+        d.mkdir(parents=True, exist_ok=True)
+
+    (base / "__init__.py").write_text("# pytorch3d stub — ANIMA-MECHANICUS\n")
+
+    (base / "transforms" / "__init__.py").write_text('''\
+import torch
+import torch.nn.functional as F
+
+def quaternion_to_matrix(q):
+    r,i,j,k = torch.unbind(q,-1); s = 2.0/(q*q).sum(-1)
+    o = torch.stack([1-s*(j*j+k*k),s*(i*j-k*r),s*(i*k+j*r),
+                     s*(i*j+k*r),1-s*(i*i+k*k),s*(j*k-i*r),
+                     s*(i*k-j*r),s*(j*k+i*r),1-s*(i*i+j*j)],-1)
+    return o.reshape(q.shape[:-1]+(3,3))
+
+def _sp(x):
+    return torch.where(x>0, torch.sqrt(torch.clamp(x,min=0)), torch.zeros_like(x))
+
+def matrix_to_quaternion(m):
+    b = m.shape[:-2]
+    m00,m01,m02,m10,m11,m12,m20,m21,m22 = torch.unbind(m.reshape(b+(9,)),-1)
+    q = _sp(torch.stack([1+m00+m11+m22,1+m00-m11-m22,
+                          1-m00+m11-m22,1-m00-m11+m22],-1)/4.0)
+    w,x,y,z = torch.unbind(q,-1)
+    r = torch.stack([w, torch.copysign(x,m21-m12),
+                     torch.copysign(y,m02-m20),
+                     torch.copysign(z,m10-m01)],-1)
+    return r/r.norm(dim=-1,keepdim=True).clamp(min=1e-8)
+
+def axis_angle_to_quaternion(aa):
+    ang = torch.norm(aa,p=2,dim=-1,keepdim=True).clamp(min=1e-6); h = ang*0.5
+    s = torch.where(ang<1e-6, 0.5-(ang*ang)/48, torch.sin(h)/ang)
+    return torch.cat([torch.cos(h), aa*s],-1)
+
+def axis_angle_to_matrix(aa):
+    return quaternion_to_matrix(axis_angle_to_quaternion(aa))
+
+def quaternion_to_axis_angle(q):
+    n = torch.norm(q[...,1:],p=2,dim=-1,keepdim=True)
+    h = torch.atan2(n, q[...,:1]); ang = 2*h
+    s = torch.where(ang<1e-6, 0.5-(ang*ang)/48, torch.sin(h)/ang)
+    return q[...,1:]/s.clamp(min=1e-8)
+
+def matrix_to_axis_angle(m):
+    return quaternion_to_axis_angle(matrix_to_quaternion(m))
+
+so3_exp_map = axis_angle_to_matrix
+so3_log_map = matrix_to_axis_angle
+
+def rotation_6d_to_matrix(d6):
+    a1,a2 = d6[...,:3],d6[...,3:]
+    b1 = F.normalize(a1,dim=-1)
+    b2 = F.normalize(a2-(b1*a2).sum(-1,keepdim=True)*b1,dim=-1)
+    return torch.stack((b1,b2,torch.linalg.cross(b1,b2)),dim=-2)
+
+def matrix_to_rotation_6d(m):
+    return m[...,:2,:].clone().reshape(m.shape[:-2]+(6,))
+
+def euler_angles_to_matrix(angles, convention):
+    def _r(a, ax):
+        c,s = torch.cos(a),torch.sin(a); z,o = torch.zeros_like(c),torch.ones_like(c)
+        if ax=="X": rows=[[o,z,z],[z,c,-s],[z,s,c]]
+        elif ax=="Y": rows=[[c,z,s],[z,o,z],[-s,z,c]]
+        else: rows=[[c,-s,z],[s,c,z],[z,z,o]]
+        return torch.stack([torch.stack(r,-1) for r in rows],-2)
+    m = [_r(angles[...,i],convention[i]) for i in range(3)]
+    return m[0]@m[1]@m[2]
+
+def standardize_quaternion(q):
+    return torch.where(q[...,:1]<0,-q,q)
+
+def quaternion_raw_multiply(a,b):
+    aw,ax,ay,az = torch.unbind(a,-1); bw,bx,by,bz = torch.unbind(b,-1)
+    return torch.stack([aw*bw-ax*bx-ay*by-az*bz,aw*bx+ax*bw+ay*bz-az*by,
+                        aw*by-ax*bz+ay*bw+az*bx,aw*bz+ax*by-ay*bx+az*bw],-1)
+
+def quaternion_multiply(a,b):
+    return standardize_quaternion(quaternion_raw_multiply(a,b))
+
+def quaternion_invert(q):
+    return q*torch.tensor([1,-1,-1,-1],dtype=q.dtype,device=q.device)
+''')
+
+    marker.write_text('''\
+class Meshes:
+    def __init__(self,verts=None,faces=None,textures=None,**kw):
+        self.verts_list_=verts; self.faces_list_=faces; self.textures=textures
+    def verts_padded(self): return self.verts_list_
+    def faces_padded(self): return self.faces_list_
+    def __len__(self): return len(self.verts_list_) if self.verts_list_ is not None else 0
+
+def join_meshes_as_scene(meshes,include_textures=True):
+    return meshes[0] if meshes else Meshes()
+''')
+
+    (base / "structures" / "__init__.py").write_text(
+        "from pytorch3d.structures.meshes import Meshes, join_meshes_as_scene\n")
+
+    (base / "renderer" / "cameras.py").write_text('''\
+import torch, torch.nn.functional as F
+
+def look_at_rotation(camera_position,at=None,up=None,device="cpu"):
+    if at is None: at=torch.zeros(3,device=device)
+    if up is None: up=torch.tensor([0.,1.,0.],device=device)
+    z=F.normalize(camera_position-at,dim=-1)
+    x=F.normalize(torch.cross(up.expand_as(z),z,dim=-1),dim=-1)
+    return torch.stack([x,torch.cross(z,x,dim=-1),z],dim=-1)
+''')
+
+    (base / "renderer" / "__init__.py").write_text(
+        "from pytorch3d.renderer.cameras import look_at_rotation\n")
+
+
 def run_gvhmr(video_path: str, segments: list, gvhmr_dir: str, tmp_dir: str) -> dict:
     """
     Appelle GVHMR sur chaque segment validé et retourne les poses SMPL.
@@ -983,6 +1109,9 @@ def run_gvhmr(video_path: str, segments: list, gvhmr_dir: str, tmp_dir: str) -> 
         print("    git clone https://github.com/zju3dv/GVHMR.git ~/GVHMR")
         print("    cd ~/GVHMR && pip install -r requirements.txt && pip install -e .")
         sys.exit(1)
+
+    # Stub pytorch3d dans gvhmr_dir (1er dans PYTHONPATH) — persistant, sans /tmp
+    _setup_gvhmr_pytorch3d(gvhmr_dir)
 
     demo_script = gvhmr_dir / "tools" / "demo" / "demo.py"
     if not demo_script.exists():
