@@ -87,29 +87,29 @@ Sera re-executee integralement apres migration GVHMR.
 
 ---
 
-## PHASE 6 : MIGRATION GVHMR [EN COURS]
+## PHASE 6 : MIGRATION GVHMR [CODE TERMINE — Re-validation en attente]
 
 **Raison** : WHAM bloque par dependances mmcv/detectron2 sur Colab T4 actuel.
 **GVHMR** (SIGGRAPH Asia 2024) confirme fonctionnel sur T4 via notebook officiel.
 **Impact code** : seul `run_wham()` dans motus_extract.py est a remplacer. Tout le reste est intact.
 
-### 6.1 motus_extract.py — Module extraction
-- [ ] Remplacer `run_wham()` par `run_gvhmr()` (appel subprocess demo.py GVHMR)
-- [ ] Adapter lecture sortie GVHMR → meme format passes/transl que WHAM
-- [ ] Implementer cas `FrankMocap_upper` : masquage joints inferieurs (LeftUpperLeg, LeftLowerLeg, LeftFoot, RightUpperLeg, RightLowerLeg, RightFoot → quaternion identite)
-- [ ] Supprimer references WHAM/mmcv/detectron2
+### 6.1 motus_extract.py — Module extraction [DONE]
+- [x] Remplacer `run_wham()` par `run_gvhmr()` (appel subprocess demo.py GVHMR)
+- [x] Adapter lecture sortie GVHMR → meme format passes/transl que WHAM
+- [x] Implementer cas `FrankMocap_upper` : masquage joints inferieurs (LeftUpperLeg, LeftLowerLeg, LeftFoot, RightUpperLeg, RightLowerLeg, RightFoot → quaternion identite)
+- [x] Supprimer references WHAM/mmcv/detectron2
 
-### 6.2 ANIMA_MECHANICUS_ALPHA.ipynb — Cellule 1 uniquement
-- [ ] Refaire Cellule 1 installation : GVHMR (git clone + pip install -r requirements.txt + pip install -e .)
-- [ ] Adapter telechargement checkpoints : aria2c depuis HuggingFace (camenduru/GVHMR)
-- [ ] Supprimer installation mmcv/detectron2/WHAM
-- [ ] Cellules 2 a 7 : INCHANGEES
+### 6.2 ANIMA_MECHANICUS_ALPHA.ipynb — Cellule 1 uniquement [DONE]
+- [x] Refaire Cellule 1 installation : GVHMR (git clone + pip install -r requirements.txt + pip install -e .)
+- [x] Adapter telechargement checkpoints : aria2c depuis HuggingFace (camenduru/GVHMR)
+- [x] Supprimer installation mmcv/detectron2/WHAM
+- [x] Cellules 2 a 7 : INCHANGEES
 
 ### 6.3 Documentation
 - [x] STATE.md mis a jour (V4 — GVHMR)
 - [x] ROADMAP.md mis a jour
 - [ ] PRD.md mis a jour (stack technique, pipeline step 2)
-- [ ] README.md mis a jour
+- [x] README.md mis a jour
 
 ### 6.4 Re-validation (Phase 5 bis)
 - [ ] Re-executer tous les tests de Phase 5 avec GVHMR
