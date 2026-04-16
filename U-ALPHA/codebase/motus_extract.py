@@ -847,9 +847,13 @@ def run_gvhmr(video_path: str, segments: list, gvhmr_dir: str, tmp_dir: str) -> 
         # PYTHONPATH garantit que hmr4d est importable depuis le repo clone
         # On lance demo.py comme script direct (pas via exec) pour que
         # __file__, sys.argv[0] et argparse fonctionnent correctement.
+        # /tmp/pytorch3d_shim est inclus en fallback si pip install a echoue
+        # silencieusement (Python 3.12 / pip 24+ sans pyproject.toml)
         _env = os.environ.copy()
         _env["PYTHONPATH"] = (
-            str(gvhmr_dir) + os.pathsep + _env.get("PYTHONPATH", "")
+            str(gvhmr_dir) + os.pathsep
+            + "/tmp/pytorch3d_shim" + os.pathsep
+            + _env.get("PYTHONPATH", "")
         )
 
         result = subprocess.run(
