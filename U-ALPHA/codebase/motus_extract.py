@@ -844,20 +844,20 @@ def run_gvhmr(video_path: str, segments: list, gvhmr_dir: str, tmp_dir: str) -> 
         gvhmr_out = os.path.join(tmp_dir, f"gvhmr_P{pid}_{int(start_s*10):06d}")
         os.makedirs(gvhmr_out, exist_ok=True)
 
-        # PYTHONPATH doit inclure gvhmr_dir pour que hmr4d soit importable dans le subprocess
-        import os as _os
-        _env = _os.environ.copy()
-        _existing_pp = _env.get("PYTHONPATH", "")
-        _env["PYTHONPATH"] = f"{gvhmr_dir}:{_existing_pp}" if _existing_pp else str(gvhmr_dir)
+        # Injection sys.path via -c pour garantir que hmr4d est importable
+        # (plus fiable que PYTHONPATH qui peut etre ignore dans les venvs Colab 2026)
+        _inject = (
+            f"import sys; sys.path.insert(0, r'{gvhmr_dir}'); "
+            f"exec(open(r'{demo_script}').read())"
+        )
 
         result = subprocess.run(
-            [sys.executable, str(demo_script),
+            [sys.executable, "-c", _inject,
              "--video", seg_video,
              "--output_root", gvhmr_out,
              "--no_crop"],
             cwd=str(gvhmr_dir),
-            capture_output=True, text=True,
-            env=_env
+            capture_output=True, text=True
         )
         if result.returncode != 0:
             print(f"[U-ALPHA][GVHMR] ERREUR segment P{pid} {start_s:.1f}s : {result.stderr[-300:]}")
@@ -1163,5 +1163,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
