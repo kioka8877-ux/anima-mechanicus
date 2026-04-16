@@ -803,6 +803,32 @@ def mask_lower_body_joints(rots: np.ndarray) -> np.ndarray:
     return result
 
 
+_OPS_KNN_CODE = """import torch
+from collections import namedtuple
+
+_KNN = namedtuple("KNN", "dists idx knn")
+
+def knn_points(p1, p2, lengths1=None, lengths2=None, K=1,
+               return_nn=False, return_sorted=True, norm=2):
+    \"\"\"Drop-in pytorch3d.ops.knn_points — pure PyTorch, zero C++/CUDA extension.\"\"\"
+    dists = torch.cdist(p1.float(), p2.float(), p=norm)  # (N, P1, P2)
+    K = min(K, p2.shape[1])
+    dists_k, idx_k = torch.topk(dists, K, dim=-1, largest=False, sorted=return_sorted)
+    if norm == 2:
+        dists_k = dists_k ** 2  # squared L2 — matches pytorch3d convention
+    knn_pts = knn_gather(p2, idx_k) if return_nn else None
+    return _KNN(dists=dists_k, idx=idx_k, knn=knn_pts)
+
+def knn_gather(p, idx):
+    \"\"\"Gather K-nearest neighbour points. p: (N, P2, D), idx: (N, P1, K).\"\"\"
+    N, P2, D = p.shape
+    _, P1, K = idx.shape
+    idx_exp = idx.unsqueeze(-1).expand(N, P1, K, D)
+    p_exp = p.unsqueeze(1).expand(N, P1, P2, D)
+    return p_exp.gather(2, idx_exp)
+"""
+
+
 def _ensure_pytorch3d_shim() -> str:
     """
     Cree un shim pytorch3d minimal (pur PyTorch, zero compilation) si le
@@ -815,13 +841,14 @@ def _ensure_pytorch3d_shim() -> str:
     shim_xforms   = os.path.join(shim_pkg, "transforms")
     shim_structs  = os.path.join(shim_pkg, "structures")
     shim_renderer = os.path.join(shim_pkg, "renderer")
-    # Marker pointe sur structures/meshes.py — si absent le shim est incomplet
-    marker = os.path.join(shim_structs, "meshes.py")
+    shim_ops      = os.path.join(shim_pkg, "ops")
+    # Marker pointe sur ops/knn.py — si absent le shim est incomplet
+    marker = os.path.join(shim_ops, "knn.py")
 
     if os.path.exists(marker):
         return shim_parent
 
-    for d in (shim_xforms, shim_structs, shim_renderer):
+    for d in (shim_xforms, shim_structs, shim_renderer, shim_ops):
         os.makedirs(d, exist_ok=True)
 
     # ── pytorch3d/__init__.py ────────────────────────────────────────────────
@@ -967,6 +994,14 @@ def look_at_rotation(camera_position, at=None, up=None, device="cpu"):
     with open(os.path.join(shim_renderer, "__init__.py"), "w") as _f:
         _f.write("from pytorch3d.renderer.cameras import look_at_rotation\n")
 
+    # ── pytorch3d/ops/knn.py ─────────────────────────────────────────────────
+    with open(os.path.join(shim_ops, "knn.py"), "w") as _f:
+        _f.write(_OPS_KNN_CODE)
+
+    # ── pytorch3d/ops/__init__.py ─────────────────────────────────────────────
+    with open(os.path.join(shim_ops, "__init__.py"), "w") as _f:
+        _f.write("from pytorch3d.ops.knn import knn_points, knn_gather\n")
+
     return shim_parent
 
 
@@ -978,11 +1013,11 @@ def _setup_gvhmr_pytorch3d(gvhmr_dir: Path) -> None:
     Idempotent : ne recree que si structures/meshes.py est absent.
     """
     base = gvhmr_dir / "pytorch3d"
-    marker = base / "structures" / "meshes.py"
+    marker = base / "ops" / "knn.py"
     if marker.exists():
         return
 
-    for d in (base / "transforms", base / "structures", base / "renderer"):
+    for d in (base / "transforms", base / "structures", base / "renderer", base / "ops"):
         d.mkdir(parents=True, exist_ok=True)
 
     (base / "__init__.py").write_text("# pytorch3d stub — ANIMA-MECHANICUS\n")
@@ -1095,6 +1130,13 @@ def look_at_rotation(camera_position,at=None,up=None,device="cpu"):
     (base / "renderer" / "__init__.py").write_text(
         "from pytorch3d.renderer.cameras import look_at_rotation\n")
 
+    # ── pytorch3d/ops/knn.py ─────────────────────────────────────────────────
+    (base / "ops" / "knn.py").write_text(_OPS_KNN_CODE)
+
+    # ── pytorch3d/ops/__init__.py ─────────────────────────────────────────────
+    (base / "ops" / "__init__.py").write_text(
+        "from pytorch3d.ops.knn import knn_points, knn_gather\n")
+
 
 def _patch_gvhmr_vis_imports(gvhmr_dir: Path) -> None:
     """
@@ -1131,6 +1173,8 @@ def _patch_gvhmr_vis_imports(gvhmr_dir: Path) -> None:
 
     patches = [
         # (chemin relatif, prefixes a wrapper)
+        ("hmr4d/utils/geo_transform.py",
+         ["import pytorch3d.ops", "from pytorch3d.ops"]),
         ("hmr4d/utils/vis/renderer.py",
          ["from pytorch3d", "import pytorch3d"]),
         ("hmr4d/utils/wis3d_utils.py",
