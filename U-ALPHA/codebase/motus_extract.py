@@ -1096,6 +1096,57 @@ def look_at_rotation(camera_position,at=None,up=None,device="cpu"):
         "from pytorch3d.renderer.cameras import look_at_rotation\n")
 
 
+def _patch_gvhmr_vis_imports(gvhmr_dir: Path) -> None:
+    """
+    Patche les fichiers GVHMR de visualisation pour entourer leurs imports
+    problematiques (pytorch3d renderer, wis3d, pyrender...) d'un try/except.
+    Ces modules ne sont PAS necessaires pour la generation du .npz.
+    Idempotent — detecte si le patch est deja applique.
+    """
+    def _wrap_imports(filepath: Path, patterns: list) -> bool:
+        """Entoure chaque ligne matchant un pattern de try/except. Retourne True si modifie."""
+        if not filepath.exists():
+            return False
+        src = filepath.read_text()
+        if "_PATCHED_BY_ANIMA" in src:
+            return False
+        lines = src.splitlines()
+        new_lines = ["# _PATCHED_BY_ANIMA"]
+        changed = False
+        for line in lines:
+            stripped = line.lstrip()
+            matched = any(stripped.startswith(p) for p in patterns)
+            if matched:
+                indent = line[: len(line) - len(stripped)]
+                new_lines.append(f"{indent}try:")
+                new_lines.append(f"{indent}    {stripped}")
+                new_lines.append(f"{indent}except (ImportError, Exception):")
+                new_lines.append(f"{indent}    pass")
+                changed = True
+            else:
+                new_lines.append(line)
+        if changed:
+            filepath.write_text("\n".join(new_lines))
+        return changed
+
+    patches = [
+        # (chemin relatif, prefixes a wrapper)
+        ("hmr4d/utils/vis/renderer.py",
+         ["from pytorch3d", "import pytorch3d"]),
+        ("hmr4d/utils/wis3d_utils.py",
+         ["from wis3d", "import wis3d"]),
+        ("hmr4d/utils/vis/cv2_utils.py",
+         ["from hmr4d.utils.wis3d_utils"]),
+        ("hmr4d/utils/vis/mesh_renderer.py",
+         ["from pytorch3d", "import pytorch3d", "import pyrender", "from pyrender"]),
+    ]
+
+    for rel, pats in patches:
+        path = gvhmr_dir / rel
+        if _wrap_imports(path, pats):
+            print(f"[U-ALPHA][GVHMR] Patch visu : {rel}")
+
+
 def run_gvhmr(video_path: str, segments: list, gvhmr_dir: str, tmp_dir: str) -> dict:
     """
     Appelle GVHMR sur chaque segment validé et retourne les poses SMPL.
@@ -1110,8 +1161,9 @@ def run_gvhmr(video_path: str, segments: list, gvhmr_dir: str, tmp_dir: str) -> 
         print("    cd ~/GVHMR && pip install -r requirements.txt && pip install -e .")
         sys.exit(1)
 
-    # Stub pytorch3d dans gvhmr_dir (1er dans PYTHONPATH) — persistant, sans /tmp
+    # Stub pytorch3d + patch imports de visualisation (renderer, wis3d, cv2_utils)
     _setup_gvhmr_pytorch3d(gvhmr_dir)
+    _patch_gvhmr_vis_imports(gvhmr_dir)
 
     demo_script = gvhmr_dir / "tools" / "demo" / "demo.py"
     if not demo_script.exists():
