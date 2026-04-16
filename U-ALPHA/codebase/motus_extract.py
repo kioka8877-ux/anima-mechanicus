@@ -1306,8 +1306,7 @@ def run_gvhmr(video_path: str, segments: list, gvhmr_dir: str, tmp_dir: str) -> 
 
         _cmd = [sys.executable, str(demo_script),
                 "--video", seg_video,
-                "--output_root", gvhmr_out,
-                "--no_crop"]
+                "--output_root", gvhmr_out]
         _installed_this_seg = set()
         result = None
 
