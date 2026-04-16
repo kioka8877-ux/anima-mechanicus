@@ -108,7 +108,7 @@ Sera re-executee integralement apres migration GVHMR.
 ### 6.3 Documentation
 - [x] STATE.md mis a jour (V4 — GVHMR)
 - [x] ROADMAP.md mis a jour
-- [ ] PRD.md mis a jour (stack technique, pipeline step 2)
+- [x] PRD.md mis a jour (stack technique, pipeline step 2)
 - [x] README.md mis a jour
 
 ### 6.4 Re-validation (Phase 5 bis)
