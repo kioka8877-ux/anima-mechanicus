@@ -141,7 +141,7 @@ RightUpperLeg, RightLowerLeg, RightFoot
           "distance_camera": "proche|moyen|lointain",
           "type_mouvement": "marche|danse|combat|sport|statique",
           "qualite_estimee": float,
-          "modele_recommande": "WHAM|FrankMocap_upper|DECA|skip",
+          "modele_recommande": "GVHMR|FrankMocap_upper|DECA|skip",
           "problemes": []
         }
       ],
@@ -163,7 +163,7 @@ RightUpperLeg, RightLowerLeg, RightFoot
 }
 ```
 
-Note : le champ `modele_recommande` peut valoir `WHAM` (legacy) — traite identiquement a `GVHMR` depuis V4.
+Note : valeur `GVHMR` = pipeline complet. `FrankMocap_upper` = GVHMR + masquage joints inferieurs. `DECA` = segment skippe (tete seulement, non supporte). `skip` = segment exclu.
 
 ---
 
