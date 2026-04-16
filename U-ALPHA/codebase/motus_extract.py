@@ -844,19 +844,21 @@ def run_gvhmr(video_path: str, segments: list, gvhmr_dir: str, tmp_dir: str) -> 
         gvhmr_out = os.path.join(tmp_dir, f"gvhmr_P{pid}_{int(start_s*10):06d}")
         os.makedirs(gvhmr_out, exist_ok=True)
 
-        # Injection sys.path via -c pour garantir que hmr4d est importable
-        # (plus fiable que PYTHONPATH qui peut etre ignore dans les venvs Colab 2026)
-        _inject = (
-            f"import sys; sys.path.insert(0, r'{gvhmr_dir}'); "
-            f"exec(open(r'{demo_script}').read())"
+        # PYTHONPATH garantit que hmr4d est importable depuis le repo clone
+        # On lance demo.py comme script direct (pas via exec) pour que
+        # __file__, sys.argv[0] et argparse fonctionnent correctement.
+        _env = os.environ.copy()
+        _env["PYTHONPATH"] = (
+            str(gvhmr_dir) + os.pathsep + _env.get("PYTHONPATH", "")
         )
 
         result = subprocess.run(
-            [sys.executable, "-c", _inject,
+            [sys.executable, str(demo_script),
              "--video", seg_video,
              "--output_root", gvhmr_out,
              "--no_crop"],
             cwd=str(gvhmr_dir),
+            env=_env,
             capture_output=True, text=True
         )
         if result.returncode != 0:
