@@ -813,22 +813,23 @@ def _ensure_pytorch3d_shim() -> str:
     shim_parent   = "/tmp/pytorch3d_shim"
     shim_pkg      = os.path.join(shim_parent, "pytorch3d")
     shim_xforms   = os.path.join(shim_pkg, "transforms")
-    marker        = os.path.join(shim_xforms, "__init__.py")
+    shim_structs  = os.path.join(shim_pkg, "structures")
+    shim_renderer = os.path.join(shim_pkg, "renderer")
+    # Marker pointe sur structures/meshes.py — si absent le shim est incomplet
+    marker = os.path.join(shim_structs, "meshes.py")
 
     if os.path.exists(marker):
         return shim_parent
 
-    for d in (shim_xforms,
-              os.path.join(shim_pkg, "structures"),
-              os.path.join(shim_pkg, "renderer")):
+    for d in (shim_xforms, shim_structs, shim_renderer):
         os.makedirs(d, exist_ok=True)
 
+    # ── pytorch3d/__init__.py ────────────────────────────────────────────────
     with open(os.path.join(shim_pkg, "__init__.py"), "w") as _f:
         _f.write("# pytorch3d minimal shim — ANIMA-MECHANICUS\n")
-    for sub in ("structures", "renderer"):
-        open(os.path.join(shim_pkg, sub, "__init__.py"), "w").close()
 
-    _code = '''\
+    # ── pytorch3d/transforms/__init__.py ────────────────────────────────────
+    _transforms_code = '''\
 import torch
 import torch.nn.functional as F
 
@@ -877,6 +878,9 @@ def quaternion_to_axis_angle(q):
 def matrix_to_axis_angle(m):
     return quaternion_to_axis_angle(matrix_to_quaternion(m))
 
+so3_exp_map = axis_angle_to_matrix
+so3_log_map = matrix_to_axis_angle
+
 def rotation_6d_to_matrix(d6):
     a1, a2 = d6[..., :3], d6[..., 3:]
     b1 = F.normalize(a1, dim=-1)
@@ -886,6 +890,17 @@ def rotation_6d_to_matrix(d6):
 
 def matrix_to_rotation_6d(m):
     return m[..., :2, :].clone().reshape(m.shape[:-2] + (6,))
+
+def euler_angles_to_matrix(angles, convention):
+    def _rot(a, ax):
+        c, s = torch.cos(a), torch.sin(a)
+        z, o = torch.zeros_like(c), torch.ones_like(c)
+        if ax == "X": rows = [[o,z,z],[z,c,-s],[z,s,c]]
+        elif ax == "Y": rows = [[c,z,s],[z,o,z],[-s,z,c]]
+        else: rows = [[c,-s,z],[s,c,z],[z,z,o]]
+        return torch.stack([torch.stack(r,-1) for r in rows], -2)
+    m = [_rot(angles[..., i], convention[i]) for i in range(3)]
+    return m[0] @ m[1] @ m[2]
 
 def standardize_quaternion(q):
     return torch.where(q[..., 0:1] < 0, -q, q)
@@ -907,8 +922,50 @@ def quaternion_invert(q):
     s = torch.tensor([1, -1, -1, -1], dtype=q.dtype, device=q.device)
     return q * s
 '''
+    with open(os.path.join(shim_xforms, "__init__.py"), "w") as _f:
+        _f.write(_transforms_code)
+
+    # ── pytorch3d/structures/meshes.py ──────────────────────────────────────
+    _meshes_code = '''\
+class Meshes:
+    def __init__(self, verts=None, faces=None, textures=None, **kw):
+        self.verts_list_ = verts
+        self.faces_list_ = faces
+        self.textures = textures
+    def verts_padded(self): return self.verts_list_
+    def faces_padded(self): return self.faces_list_
+    def __len__(self):
+        return len(self.verts_list_) if self.verts_list_ is not None else 0
+
+def join_meshes_as_scene(meshes, include_textures=True):
+    return meshes[0] if meshes else Meshes()
+'''
     with open(marker, "w") as _f:
-        _f.write(_code)
+        _f.write(_meshes_code)
+
+    # ── pytorch3d/structures/__init__.py ────────────────────────────────────
+    with open(os.path.join(shim_structs, "__init__.py"), "w") as _f:
+        _f.write("from pytorch3d.structures.meshes import Meshes, join_meshes_as_scene\n")
+
+    # ── pytorch3d/renderer/cameras.py ───────────────────────────────────────
+    _cameras_code = '''\
+import torch
+import torch.nn.functional as F
+
+def look_at_rotation(camera_position, at=None, up=None, device="cpu"):
+    if at is None: at = torch.zeros(3, device=device)
+    if up is None: up = torch.tensor([0., 1., 0.], device=device)
+    z = F.normalize(camera_position - at, dim=-1)
+    x = F.normalize(torch.cross(up.expand_as(z), z, dim=-1), dim=-1)
+    y = torch.cross(z, x, dim=-1)
+    return torch.stack([x, y, z], dim=-1)
+'''
+    with open(os.path.join(shim_renderer, "cameras.py"), "w") as _f:
+        _f.write(_cameras_code)
+
+    # ── pytorch3d/renderer/__init__.py ──────────────────────────────────────
+    with open(os.path.join(shim_renderer, "__init__.py"), "w") as _f:
+        _f.write("from pytorch3d.renderer.cameras import look_at_rotation\n")
 
     return shim_parent
 
