@@ -1306,7 +1306,8 @@ def run_gvhmr(video_path: str, segments: list, gvhmr_dir: str, tmp_dir: str) -> 
 
         _cmd = [sys.executable, str(demo_script),
                 "--video", seg_video,
-                "--output_root", gvhmr_out]
+                "--output_root", gvhmr_out,
+                "--static_cam"]  # Skip DPVO camera tracking (fails on panning cameras)
         _installed_this_seg = set()
         result = None
 
