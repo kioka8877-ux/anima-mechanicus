@@ -1140,28 +1140,72 @@ def run_gvhmr(video_path: str, segments: list, gvhmr_dir: str, tmp_dir: str) -> 
         gvhmr_out = os.path.join(tmp_dir, f"gvhmr_P{pid}_{int(start_s*10):06d}")
         os.makedirs(gvhmr_out, exist_ok=True)
 
-        # PYTHONPATH garantit que hmr4d ET pytorch3d sont importables.
-        # _ensure_pytorch3d_shim() cree le shim a la volee si pytorch3d
-        # n'est pas installe (Python 3.12 / pip 24+ Colab 2026).
-        _shim_path = _ensure_pytorch3d_shim()
         _env = os.environ.copy()
-        _env["PYTHONPATH"] = (
-            str(gvhmr_dir) + os.pathsep
-            + _shim_path + os.pathsep
-            + _env.get("PYTHONPATH", "")
-        )
+        _env["PYTHONPATH"] = str(gvhmr_dir) + os.pathsep + _env.get("PYTHONPATH", "")
 
-        result = subprocess.run(
-            [sys.executable, str(demo_script),
-             "--video", seg_video,
-             "--output_root", gvhmr_out,
-             "--no_crop"],
-            cwd=str(gvhmr_dir),
-            env=_env,
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            print(f"[U-ALPHA][GVHMR] ERREUR segment P{pid} {start_s:.1f}s : {result.stderr[-300:]}")
+        # Mapping module → pip package pour l'auto-repair dynamique
+        _PKG_MAP = {
+            "ffmpeg":       "ffmpeg-python",
+            "wis3d":        "wis3d",
+            "roma":         "roma",
+            "smplx":        "smplx",
+            "einops":       "einops",
+            "hydra":        "hydra-core>=1.3",
+            "hydra_zen":    "hydra-zen",
+            "omegaconf":    "omegaconf>=2.3",
+            "yacs":         "yacs",
+            "trimesh":      "trimesh",
+            "pyrender":     "pyrender",
+            "plyfile":      "plyfile",
+            "loguru":       "loguru",
+            "rich":         "rich",
+            "timm":         "timm",
+            "accelerate":   "accelerate",
+            "chumpy":       "chumpy",
+        }
+
+        _cmd = [sys.executable, str(demo_script),
+                "--video", seg_video,
+                "--output_root", gvhmr_out,
+                "--no_crop"]
+        _installed_this_seg = set()
+        result = None
+
+        for _attempt in range(10):
+            result = subprocess.run(
+                _cmd, cwd=str(gvhmr_dir), env=_env,
+                capture_output=True, text=True
+            )
+            if result.returncode == 0:
+                break
+
+            # Detecte ModuleNotFoundError dans stderr
+            import re as _re
+            _match = _re.search(
+                r"ModuleNotFoundError: No module named '([^']+)'",
+                result.stderr
+            )
+            if not _match:
+                break  # Erreur non-dep — on sort
+
+            _mod = _match.group(1).split(".")[0]  # ex: "ffmpeg", "wis3d"
+            if _mod in _installed_this_seg:
+                break  # Deja tente, echec reel
+            _pkg = _PKG_MAP.get(_mod, _mod)  # fallback: meme nom
+            print(f"[U-ALPHA][GVHMR] Auto-repair : installation de {_pkg} ...")
+            _r = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-q", _pkg],
+                capture_output=True, text=True
+            )
+            if _r.returncode != 0:
+                print(f"[U-ALPHA][GVHMR] Echec installation {_pkg} : {_r.stderr[-200:]}")
+                break
+            _installed_this_seg.add(_mod)
+            print(f"[U-ALPHA][GVHMR] {_pkg} installe — retry {_attempt + 1}/9")
+
+        if result is None or result.returncode != 0:
+            _err_tail = result.stderr[-300:] if result else "?"
+            print(f"[U-ALPHA][GVHMR] ERREUR segment P{pid} {start_s:.1f}s : {_err_tail}")
             continue
 
         # GVHMR écrit dans {output_root}/{video_stem}/
