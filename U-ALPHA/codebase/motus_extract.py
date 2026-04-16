@@ -1138,6 +1138,24 @@ def look_at_rotation(camera_position,at=None,up=None,device="cpu"):
         "from pytorch3d.ops.knn import knn_points, knn_gather\n")
 
 
+_RENDERER_STUB = """# _STUB_BY_ANIMA — renderer stub ANIMA-MECHANICUS
+# La generation .npz ne necessite pas de rendu 3D.
+import numpy as np
+import torch
+
+class Renderer:
+    def __init__(self, *args, **kwargs): pass
+    def __call__(self, *args, **kwargs): return None
+    def render_mesh(self, *args, **kwargs): return None
+
+def get_global_cameras_static(points, device="cpu", **kwargs):
+    return None, None
+
+def get_ground_params_from_points(joints, verts=None, **kwargs):
+    return None, None, None
+"""
+
+
 def _patch_gvhmr_vis_imports(gvhmr_dir: Path) -> None:
     """
     Patche les fichiers GVHMR de visualisation pour entourer leurs imports
@@ -1190,21 +1208,28 @@ def _patch_gvhmr_vis_imports(gvhmr_dir: Path) -> None:
             filepath.write_text("\n".join(new_lines))
         return changed
 
-    patches = [
-        # (chemin relatif, prefixes a wrapper)
+    # ── renderer.py : stub complet — evite le patching fragile d'imports multi-lignes ──
+    renderer_path = gvhmr_dir / "hmr4d/utils/vis/renderer.py"
+    if renderer_path.exists():
+        src = renderer_path.read_text()
+        if "_STUB_BY_ANIMA" not in src and "_PATCHED_BY_ANIMA" not in src:
+            renderer_path.write_text(_RENDERER_STUB)
+            print("[U-ALPHA][GVHMR] Stub visu : hmr4d/utils/vis/renderer.py")
+        elif "_PATCHED_BY_ANIMA" in src:
+            # Remplacer l'ancien patch corrompu par le stub propre
+            renderer_path.write_text(_RENDERER_STUB)
+            print("[U-ALPHA][GVHMR] Stub visu (remplacement patch corrompu) : hmr4d/utils/vis/renderer.py")
+
+    # ── autres fichiers visu : wrap imports simples (pas de multi-lignes) ──
+    simple_patches = [
         ("hmr4d/utils/geo_transform.py",
          ["import pytorch3d.ops", "from pytorch3d.ops"]),
-        ("hmr4d/utils/vis/renderer.py",
-         ["from pytorch3d", "import pytorch3d"]),
         ("hmr4d/utils/wis3d_utils.py",
          ["from wis3d", "import wis3d"]),
         ("hmr4d/utils/vis/cv2_utils.py",
          ["from hmr4d.utils.wis3d_utils"]),
-        ("hmr4d/utils/vis/mesh_renderer.py",
-         ["from pytorch3d", "import pytorch3d", "import pyrender", "from pyrender"]),
     ]
-
-    for rel, pats in patches:
+    for rel, pats in simple_patches:
         path = gvhmr_dir / rel
         if _wrap_imports(path, pats):
             print(f"[U-ALPHA][GVHMR] Patch visu : {rel}")
